@@ -1,0 +1,16 @@
+[package]
+name = "vibe-lox"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.101"
+clap = { version = "4.5.57", features = ["derive"] }
+miette = { version = "7.6.0", features = ["fancy"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+thiserror = "2.0.18"
+winnow = "0.7.14"
+
+[dev-dependencies]
+rstest = "0.26.1"

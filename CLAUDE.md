@@ -1,0 +1,53 @@
+# vibe-lox Project Instructions
+
+## Project Overview
+
+A Lox language interpreter and compiler in Rust, implementing the grammar
+defined in `Grammar.md`. See `PLAN.md` for the phased implementation plan.
+
+## Build & Test Commands
+
+```bash
+cargo build                    # Build the project
+cargo test                     # Run all tests (unit + integration)
+cargo clippy -- -D warnings    # Lint (must be clean before commits)
+cargo fmt --check              # Check formatting
+cargo fmt                      # Fix formatting
+cargo run -- <file.lox>        # Interpret a Lox file (tree-walk, default)
+cargo run -- --vm <file.lox>   # Interpret via bytecode VM
+cargo run -- --compile <file>  # Emit LLVM IR
+cargo run -- --dump-tokens <f> # Show tokens and stop
+cargo run -- --dump-ast <f>    # Show AST (S-expressions) and stop
+cargo run                      # Enter REPL (no file argument)
+```
+
+## Architecture
+
+Pipeline: Source -> Scanner (winnow) -> Tokens -> Parser -> AST -> Interpreter/VM/Codegen
+
+- `src/scanner/` -- Tokenizer using `winnow` crate
+- `src/parser/` -- Recursive descent parser
+- `src/ast/` -- AST node definitions and printers (S-expr, JSON)
+- `src/interpreter/` -- Tree-walk interpreter (default backend)
+- `src/vm/` -- Bytecode VM (alternative backend)
+- `src/codegen/` -- LLVM IR generation via `inkwell`
+- `src/error.rs` -- Error types (`thiserror` + `miette` diagnostics)
+
+## Key Crate Dependencies
+
+- `winnow` for tokenization (not hand-written scanner)
+- `miette` (fancy) for user-facing error diagnostics with source context
+- `thiserror` for error type definitions
+- `anyhow` for `Result` type and `.context()` error propagation
+- `clap` (derive) for CLI argument parsing
+- `serde` / `serde_json` for JSON AST output
+- `inkwell` for LLVM IR generation (Phase 7)
+
+## Conventions
+
+- Use `anyhow::Result` throughout; use `.context("while ...")` before every `?`
+- Use `thiserror` for domain error enums that implement `miette::Diagnostic`
+- Use `expect()` over `unwrap()` with concise reason why it can't fail
+- Test fixtures go in `fixtures/` as `.lox` files with `.expected` sidecar files
+- Integration tests in `tests/`, examples in `examples/`
+- Run `cargo clippy` and `cargo fmt --check` after every change
