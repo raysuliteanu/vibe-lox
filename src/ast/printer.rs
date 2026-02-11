@@ -245,6 +245,6 @@ mod tests {
         let json = to_json(&program);
         let parsed: serde_json::Value =
             serde_json::from_str(&json).expect("JSON output should be valid");
-        assert!(parsed["declarations"][0]["name"] == "x");
+        assert_eq!(parsed["declarations"][0]["name"], "x");
     }
 }
