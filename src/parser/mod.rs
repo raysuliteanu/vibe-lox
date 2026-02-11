@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::ast::*;
-use crate::error::LoxError;
+use crate::error::CompileError;
 use crate::scanner::token::{Span, Token, TokenKind};
 
 static NEXT_EXPR_ID: AtomicUsize = AtomicUsize::new(0);
@@ -13,7 +13,7 @@ fn next_id() -> ExprId {
 pub struct Parser {
     tokens: Vec<Token>,
     current: usize,
-    errors: Vec<LoxError>,
+    errors: Vec<CompileError>,
 }
 
 impl Parser {
@@ -25,7 +25,7 @@ impl Parser {
         }
     }
 
-    pub fn parse(mut self) -> Result<Program, Vec<LoxError>> {
+    pub fn parse(mut self) -> Result<Program, Vec<CompileError>> {
         let mut declarations = Vec::new();
         while !self.is_at_end() {
             match self.declaration() {
@@ -43,7 +43,7 @@ impl Parser {
         }
     }
 
-    fn declaration(&mut self) -> Result<Decl, LoxError> {
+    fn declaration(&mut self) -> Result<Decl, CompileError> {
         if self.check(TokenKind::Class) {
             self.class_declaration()
         } else if self.check(TokenKind::Fun) {
@@ -55,7 +55,7 @@ impl Parser {
         }
     }
 
-    fn class_declaration(&mut self) -> Result<Decl, LoxError> {
+    fn class_declaration(&mut self) -> Result<Decl, CompileError> {
         let start = self.current_span();
         self.advance(); // consume 'class'
         let name = self.expect_identifier("class name")?;
@@ -84,7 +84,7 @@ impl Parser {
         }))
     }
 
-    fn fun_declaration(&mut self) -> Result<Decl, LoxError> {
+    fn fun_declaration(&mut self) -> Result<Decl, CompileError> {
         let start = self.current_span();
         self.advance(); // consume 'fun'
         let function = self.function("function")?;
@@ -92,7 +92,7 @@ impl Parser {
         Ok(Decl::Fun(FunDecl { function, span }))
     }
 
-    fn function(&mut self, kind: &str) -> Result<Function, LoxError> {
+    fn function(&mut self, kind: &str) -> Result<Function, CompileError> {
         let start = self.current_span();
         let name = self.expect_identifier(&format!("{kind} name"))?;
 
@@ -102,7 +102,7 @@ impl Parser {
             loop {
                 if params.len() >= 255 {
                     let span = self.current_span();
-                    return Err(LoxError::parse(
+                    return Err(CompileError::parse(
                         "can't have more than 255 parameters",
                         span.offset,
                         span.len,
@@ -128,7 +128,7 @@ impl Parser {
         })
     }
 
-    fn var_declaration(&mut self) -> Result<Decl, LoxError> {
+    fn var_declaration(&mut self) -> Result<Decl, CompileError> {
         let start = self.current_span();
         self.advance(); // consume 'var'
         let name = self.expect_identifier("variable name")?;
@@ -148,7 +148,7 @@ impl Parser {
         }))
     }
 
-    fn statement(&mut self) -> Result<Stmt, LoxError> {
+    fn statement(&mut self) -> Result<Stmt, CompileError> {
         if self.check(TokenKind::Print) {
             self.print_statement()
         } else if self.check(TokenKind::Return) {
@@ -166,7 +166,7 @@ impl Parser {
         }
     }
 
-    fn print_statement(&mut self) -> Result<Stmt, LoxError> {
+    fn print_statement(&mut self) -> Result<Stmt, CompileError> {
         let start = self.current_span();
         self.advance(); // consume 'print'
         let expression = self.expression()?;
@@ -175,7 +175,7 @@ impl Parser {
         Ok(Stmt::Print(PrintStmt { expression, span }))
     }
 
-    fn return_statement(&mut self) -> Result<Stmt, LoxError> {
+    fn return_statement(&mut self) -> Result<Stmt, CompileError> {
         let start = self.current_span();
         self.advance(); // consume 'return'
         let value = if !self.check(TokenKind::Semicolon) {
@@ -188,7 +188,7 @@ impl Parser {
         Ok(Stmt::Return(ReturnStmt { value, span }))
     }
 
-    fn block_statement(&mut self) -> Result<Stmt, LoxError> {
+    fn block_statement(&mut self) -> Result<Stmt, CompileError> {
         let start = self.current_span();
         self.advance(); // consume '{'
         let declarations = self.block_declarations()?;
@@ -196,7 +196,7 @@ impl Parser {
         Ok(Stmt::Block(BlockStmt { declarations, span }))
     }
 
-    fn block_declarations(&mut self) -> Result<Vec<Decl>, LoxError> {
+    fn block_declarations(&mut self) -> Result<Vec<Decl>, CompileError> {
         let mut declarations = Vec::new();
         while !self.check(TokenKind::RightBrace) && !self.is_at_end() {
             declarations.push(self.declaration()?);
@@ -205,7 +205,7 @@ impl Parser {
         Ok(declarations)
     }
 
-    fn if_statement(&mut self) -> Result<Stmt, LoxError> {
+    fn if_statement(&mut self) -> Result<Stmt, CompileError> {
         let start = self.current_span();
         self.advance(); // consume 'if'
         self.consume(TokenKind::LeftParen, "'(' after 'if'")?;
@@ -228,7 +228,7 @@ impl Parser {
         }))
     }
 
-    fn while_statement(&mut self) -> Result<Stmt, LoxError> {
+    fn while_statement(&mut self) -> Result<Stmt, CompileError> {
         let start = self.current_span();
         self.advance(); // consume 'while'
         self.consume(TokenKind::LeftParen, "'(' after 'while'")?;
@@ -244,7 +244,7 @@ impl Parser {
     }
 
     /// Desugar `for` into `while`.
-    fn for_statement(&mut self) -> Result<Stmt, LoxError> {
+    fn for_statement(&mut self) -> Result<Stmt, CompileError> {
         let start = self.current_span();
         self.advance(); // consume 'for'
         self.consume(TokenKind::LeftParen, "'(' after 'for'")?;
@@ -318,18 +318,18 @@ impl Parser {
         Ok(body)
     }
 
-    fn expression_statement(&mut self) -> Result<Stmt, LoxError> {
+    fn expression_statement(&mut self) -> Result<Stmt, CompileError> {
         let expression = self.expression()?;
         self.consume(TokenKind::Semicolon, "';' after expression")?;
         let span = expression.span();
         Ok(Stmt::Expression(ExprStmt { expression, span }))
     }
 
-    fn expression(&mut self) -> Result<Expr, LoxError> {
+    fn expression(&mut self) -> Result<Expr, CompileError> {
         self.assignment()
     }
 
-    fn assignment(&mut self) -> Result<Expr, LoxError> {
+    fn assignment(&mut self) -> Result<Expr, CompileError> {
         let expr = self.or()?;
 
         if self.match_token(TokenKind::Equal) {
@@ -358,7 +358,7 @@ impl Parser {
                     }));
                 }
                 _ => {
-                    return Err(LoxError::parse(
+                    return Err(CompileError::parse(
                         "invalid assignment target",
                         span.offset,
                         span.len,
@@ -370,7 +370,7 @@ impl Parser {
         Ok(expr)
     }
 
-    fn or(&mut self) -> Result<Expr, LoxError> {
+    fn or(&mut self) -> Result<Expr, CompileError> {
         let mut expr = self.and()?;
         while self.match_token(TokenKind::Or) {
             let right = self.and()?;
@@ -389,7 +389,7 @@ impl Parser {
         Ok(expr)
     }
 
-    fn and(&mut self) -> Result<Expr, LoxError> {
+    fn and(&mut self) -> Result<Expr, CompileError> {
         let mut expr = self.equality()?;
         while self.match_token(TokenKind::And) {
             let right = self.equality()?;
@@ -408,7 +408,7 @@ impl Parser {
         Ok(expr)
     }
 
-    fn equality(&mut self) -> Result<Expr, LoxError> {
+    fn equality(&mut self) -> Result<Expr, CompileError> {
         let mut expr = self.comparison()?;
         while let Some(op) = self.match_binary_op(&[TokenKind::EqualEqual, TokenKind::BangEqual]) {
             let right = self.comparison()?;
@@ -427,7 +427,7 @@ impl Parser {
         Ok(expr)
     }
 
-    fn comparison(&mut self) -> Result<Expr, LoxError> {
+    fn comparison(&mut self) -> Result<Expr, CompileError> {
         let mut expr = self.term()?;
         while let Some(op) = self.match_binary_op(&[
             TokenKind::Greater,
@@ -451,7 +451,7 @@ impl Parser {
         Ok(expr)
     }
 
-    fn term(&mut self) -> Result<Expr, LoxError> {
+    fn term(&mut self) -> Result<Expr, CompileError> {
         let mut expr = self.factor()?;
         while let Some(op) = self.match_binary_op(&[TokenKind::Plus, TokenKind::Minus]) {
             let right = self.factor()?;
@@ -470,7 +470,7 @@ impl Parser {
         Ok(expr)
     }
 
-    fn factor(&mut self) -> Result<Expr, LoxError> {
+    fn factor(&mut self) -> Result<Expr, CompileError> {
         let mut expr = self.unary()?;
         while let Some(op) = self.match_binary_op(&[TokenKind::Star, TokenKind::Slash]) {
             let right = self.unary()?;
@@ -489,7 +489,7 @@ impl Parser {
         Ok(expr)
     }
 
-    fn unary(&mut self) -> Result<Expr, LoxError> {
+    fn unary(&mut self) -> Result<Expr, CompileError> {
         if self.check(TokenKind::Bang) || self.check(TokenKind::Minus) {
             let start = self.current_span();
             let op = if self.match_token(TokenKind::Bang) {
@@ -513,7 +513,7 @@ impl Parser {
         self.call()
     }
 
-    fn call(&mut self) -> Result<Expr, LoxError> {
+    fn call(&mut self) -> Result<Expr, CompileError> {
         let mut expr = self.primary()?;
 
         loop {
@@ -539,13 +539,13 @@ impl Parser {
         Ok(expr)
     }
 
-    fn finish_call(&mut self, callee: Expr) -> Result<Expr, LoxError> {
+    fn finish_call(&mut self, callee: Expr) -> Result<Expr, CompileError> {
         let mut arguments = Vec::new();
         if !self.check(TokenKind::RightParen) {
             loop {
                 if arguments.len() >= 255 {
                     let span = self.current_span();
-                    return Err(LoxError::parse(
+                    return Err(CompileError::parse(
                         "can't have more than 255 arguments",
                         span.offset,
                         span.len,
@@ -570,7 +570,7 @@ impl Parser {
         }))
     }
 
-    fn primary(&mut self) -> Result<Expr, LoxError> {
+    fn primary(&mut self) -> Result<Expr, CompileError> {
         let token = self.peek().clone();
         match token.kind {
             TokenKind::Number => {
@@ -660,7 +660,7 @@ impl Parser {
                     span,
                 }))
             }
-            _ => Err(LoxError::parse(
+            _ => Err(CompileError::parse(
                 format!("expected expression, found '{}'", token.lexeme),
                 token.span.offset,
                 token.span.len.max(1),
@@ -708,12 +708,12 @@ impl Parser {
         None
     }
 
-    fn consume(&mut self, kind: TokenKind, message: &str) -> Result<&Token, LoxError> {
+    fn consume(&mut self, kind: TokenKind, message: &str) -> Result<&Token, CompileError> {
         if self.check(kind) {
             Ok(self.advance())
         } else {
             let token = self.peek();
-            Err(LoxError::parse(
+            Err(CompileError::parse(
                 format!("expected {message}, found '{}'", token.lexeme),
                 token.span.offset,
                 token.span.len.max(1),
@@ -721,13 +721,13 @@ impl Parser {
         }
     }
 
-    fn expect_identifier(&mut self, context: &str) -> Result<String, LoxError> {
+    fn expect_identifier(&mut self, context: &str) -> Result<String, CompileError> {
         if self.check(TokenKind::Identifier) {
             let token = self.advance().clone();
             Ok(token.lexeme)
         } else {
             let token = self.peek();
-            Err(LoxError::parse(
+            Err(CompileError::parse(
                 format!("expected {context}"),
                 token.span.offset,
                 token.span.len.max(1),
@@ -797,7 +797,7 @@ mod tests {
         Parser::new(tokens).parse().expect("parse should succeed")
     }
 
-    fn parse_err(source: &str) -> Vec<LoxError> {
+    fn parse_err(source: &str) -> Vec<CompileError> {
         let tokens = scanner::scan(source).expect("scan should succeed");
         Parser::new(tokens).parse().unwrap_err()
     }

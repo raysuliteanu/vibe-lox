@@ -9,7 +9,7 @@ use std::io::Write;
 use std::rc::Rc;
 
 use crate::ast::*;
-use crate::error::LoxError;
+use crate::error::RuntimeError;
 use crate::interpreter::callable::{Callable, LoxFunction, NativeFunction};
 use crate::interpreter::environment::Environment;
 use crate::interpreter::value::{LoxClass, LoxInstance, Value};
@@ -68,7 +68,7 @@ impl Interpreter {
         &mut self,
         program: &Program,
         locals: HashMap<ExprId, usize>,
-    ) -> Result<(), LoxError> {
+    ) -> Result<(), RuntimeError> {
         self.locals = locals;
         for decl in &program.declarations {
             self.execute_decl(decl)?;
@@ -91,14 +91,14 @@ impl Interpreter {
     }
 
     /// Execute additional declarations without resetting the environment (for REPL).
-    pub fn interpret_additional(&mut self, program: &Program) -> Result<(), LoxError> {
+    pub fn interpret_additional(&mut self, program: &Program) -> Result<(), RuntimeError> {
         for decl in &program.declarations {
             self.execute_decl(decl)?;
         }
         Ok(())
     }
 
-    fn execute_decl(&mut self, decl: &Decl) -> Result<(), LoxError> {
+    fn execute_decl(&mut self, decl: &Decl) -> Result<(), RuntimeError> {
         match decl {
             Decl::Var(v) => {
                 let value = match &v.initializer {
@@ -125,22 +125,17 @@ impl Interpreter {
         }
     }
 
-    fn execute_class(&mut self, class: &ClassDecl) -> Result<(), LoxError> {
+    fn execute_class(&mut self, class: &ClassDecl) -> Result<(), RuntimeError> {
         let superclass = if let Some(ref name) = class.superclass {
             let val = self.environment.borrow().get(name).ok_or_else(|| {
-                LoxError::runtime(
-                    format!("undefined variable '{name}'"),
-                    class.span.offset,
-                    class.span.len,
-                )
+                RuntimeError::with_span(format!("undefined variable '{name}'"), class.span)
             })?;
             match val {
                 Value::Class(sc) => Some(sc),
                 _ => {
-                    return Err(LoxError::runtime(
+                    return Err(RuntimeError::with_span(
                         "superclass must be a class",
-                        class.span.offset,
-                        class.span.len,
+                        class.span,
                     ));
                 }
             }
@@ -192,7 +187,7 @@ impl Interpreter {
         Ok(())
     }
 
-    fn execute_stmt(&mut self, stmt: &Stmt) -> Result<(), LoxError> {
+    fn execute_stmt(&mut self, stmt: &Stmt) -> Result<(), RuntimeError> {
         match stmt {
             Stmt::Expression(e) => {
                 self.evaluate_expr(&e.expression)?;
@@ -210,9 +205,7 @@ impl Interpreter {
                     Some(val) => self.evaluate_expr(val)?,
                     None => Value::Nil,
                 };
-                Err(LoxError::Return {
-                    value: Box::new(value),
-                })
+                Err(RuntimeError::Return { value })
             }
             Stmt::Block(b) => {
                 let env = Rc::new(RefCell::new(Environment::with_enclosing(Rc::clone(
@@ -243,7 +236,7 @@ impl Interpreter {
         &mut self,
         declarations: &[Decl],
         env: Rc<RefCell<Environment>>,
-    ) -> Result<(), LoxError> {
+    ) -> Result<(), RuntimeError> {
         let previous = Rc::clone(&self.environment);
         self.environment = env;
         let result = declarations.iter().try_for_each(|d| self.execute_decl(d));
@@ -251,7 +244,7 @@ impl Interpreter {
         result
     }
 
-    fn evaluate_expr(&mut self, expr: &Expr) -> Result<Value, LoxError> {
+    fn evaluate_expr(&mut self, expr: &Expr) -> Result<Value, RuntimeError> {
         match expr {
             Expr::Literal(l) => Ok(match &l.value {
                 LiteralValue::Number(n) => Value::Number(*n),
@@ -265,11 +258,7 @@ impl Interpreter {
                 match u.operator {
                     UnaryOp::Negate => match operand {
                         Value::Number(n) => Ok(Value::Number(-n)),
-                        _ => Err(LoxError::runtime(
-                            "operand must be a number",
-                            u.span.offset,
-                            u.span.len,
-                        )),
+                        _ => Err(RuntimeError::with_span("operand must be a number", u.span)),
                     },
                     UnaryOp::Not => Ok(Value::Bool(!operand.is_truthy())),
                 }
@@ -285,10 +274,9 @@ impl Interpreter {
                 } else {
                     let ok = self.globals.borrow_mut().assign(&a.name, value.clone());
                     if !ok {
-                        return Err(LoxError::runtime(
+                        return Err(RuntimeError::with_span(
                             format!("undefined variable '{}'", a.name),
-                            a.span.offset,
-                            a.span.len,
+                            a.span,
                         ));
                     }
                 }
@@ -317,17 +305,15 @@ impl Interpreter {
                     Value::Instance(inst) => {
                         let val = inst.borrow().get(&g.name, Rc::clone(&inst));
                         val.ok_or_else(|| {
-                            LoxError::runtime(
+                            RuntimeError::with_span(
                                 format!("undefined property '{}'", g.name),
-                                g.span.offset,
-                                g.span.len,
+                                g.span,
                             )
                         })
                     }
-                    _ => Err(LoxError::runtime(
+                    _ => Err(RuntimeError::with_span(
                         "only instances have properties",
-                        g.span.offset,
-                        g.span.len,
+                        g.span,
                     )),
                 }
             }
@@ -339,10 +325,9 @@ impl Interpreter {
                         inst.borrow_mut().set(s.name.clone(), value.clone());
                         Ok(value)
                     }
-                    _ => Err(LoxError::runtime(
+                    _ => Err(RuntimeError::with_span(
                         "only instances have fields",
-                        s.span.offset,
-                        s.span.len,
+                        s.span,
                     )),
                 }
             }
@@ -365,25 +350,20 @@ impl Interpreter {
 
                 if let (Value::Class(sc), Value::Instance(inst)) = (superclass, object) {
                     let method = sc.find_method(&s.method).ok_or_else(|| {
-                        LoxError::runtime(
+                        RuntimeError::with_span(
                             format!("undefined property '{}'", s.method),
-                            s.span.offset,
-                            s.span.len,
+                            s.span,
                         )
                     })?;
                     Ok(Value::Function(method.bind(inst)))
                 } else {
-                    Err(LoxError::runtime(
-                        "super lookup failed",
-                        s.span.offset,
-                        s.span.len,
-                    ))
+                    Err(RuntimeError::with_span("super lookup failed", s.span))
                 }
             }
         }
     }
 
-    fn evaluate_binary(&mut self, b: &BinaryExpr) -> Result<Value, LoxError> {
+    fn evaluate_binary(&mut self, b: &BinaryExpr) -> Result<Value, RuntimeError> {
         let left = self.evaluate_expr(&b.left)?;
         let right = self.evaluate_expr(&b.right)?;
 
@@ -391,10 +371,9 @@ impl Interpreter {
             BinaryOp::Add => match (&left, &right) {
                 (Value::Number(a), Value::Number(b_val)) => Ok(Value::Number(a + b_val)),
                 (Value::Str(a), Value::Str(b_val)) => Ok(Value::Str(format!("{a}{b_val}"))),
-                _ => Err(LoxError::runtime(
+                _ => Err(RuntimeError::with_span(
                     "operands must be two numbers or two strings",
-                    b.span.offset,
-                    b.span.len,
+                    b.span,
                 )),
             },
             BinaryOp::Subtract => number_binop(&left, &right, |a, c| a - c, b),
@@ -409,7 +388,7 @@ impl Interpreter {
         }
     }
 
-    fn evaluate_call(&mut self, c: &CallExpr) -> Result<Value, LoxError> {
+    fn evaluate_call(&mut self, c: &CallExpr) -> Result<Value, RuntimeError> {
         let callee = self.evaluate_expr(&c.callee)?;
 
         let mut args = Vec::new();
@@ -420,10 +399,9 @@ impl Interpreter {
         match callee {
             Value::Function(func) => {
                 if args.len() != func.arity() {
-                    return Err(LoxError::runtime(
+                    return Err(RuntimeError::with_span(
                         format!("expected {} arguments but got {}", func.arity(), args.len()),
-                        c.span.offset,
-                        c.span.len,
+                        c.span,
                     ));
                 }
                 self.call_function(&func, args)
@@ -432,32 +410,29 @@ impl Interpreter {
                 let instance = Rc::new(RefCell::new(LoxInstance::new(Rc::clone(&class))));
                 if let Some(init) = class.find_method("init") {
                     if args.len() != init.arity() {
-                        return Err(LoxError::runtime(
+                        return Err(RuntimeError::with_span(
                             format!("expected {} arguments but got {}", init.arity(), args.len()),
-                            c.span.offset,
-                            c.span.len,
+                            c.span,
                         ));
                     }
                     let bound = init.bind(Rc::clone(&instance));
                     self.call_function(&bound, args)?;
                 } else if !args.is_empty() {
-                    return Err(LoxError::runtime(
+                    return Err(RuntimeError::with_span(
                         format!("expected 0 arguments but got {}", args.len()),
-                        c.span.offset,
-                        c.span.len,
+                        c.span,
                     ));
                 }
                 Ok(Value::Instance(instance))
             }
-            _ => Err(LoxError::runtime(
+            _ => Err(RuntimeError::with_span(
                 "can only call functions and classes",
-                c.span.offset,
-                c.span.len,
+                c.span,
             )),
         }
     }
 
-    fn call_function(&mut self, func: &Callable, args: Vec<Value>) -> Result<Value, LoxError> {
+    fn call_function(&mut self, func: &Callable, args: Vec<Value>) -> Result<Value, RuntimeError> {
         match func {
             Callable::Native(native) => Ok(native.call(&args)),
             Callable::User(user_fn) => {
@@ -483,7 +458,7 @@ impl Interpreter {
                             Ok(Value::Nil)
                         }
                     }
-                    Err(LoxError::Return { value }) => {
+                    Err(RuntimeError::Return { value }) => {
                         if user_fn.is_initializer {
                             Ok(user_fn
                                 .closure
@@ -491,11 +466,7 @@ impl Interpreter {
                                 .get_at(0, "this")
                                 .expect("init closure has 'this'"))
                         } else {
-                            // Downcast the Box<dyn Any> back to Value
-                            let val = value
-                                .downcast::<Value>()
-                                .expect("Return should contain Value");
-                            Ok(*val)
+                            Ok(value)
                         }
                     }
                     Err(e) => Err(e),
@@ -509,7 +480,7 @@ impl Interpreter {
         name: &str,
         id: ExprId,
         span: crate::scanner::token::Span,
-    ) -> Result<Value, LoxError> {
+    ) -> Result<Value, RuntimeError> {
         if let Some(&distance) = self.locals.get(&id) {
             Ok(self
                 .environment
@@ -518,11 +489,7 @@ impl Interpreter {
                 .expect("resolver guarantees variable exists"))
         } else {
             self.globals.borrow().get(name).ok_or_else(|| {
-                LoxError::runtime(
-                    format!("undefined variable '{name}'"),
-                    span.offset,
-                    span.len,
-                )
+                RuntimeError::with_span(format!("undefined variable '{name}'"), span)
             })
         }
     }
@@ -533,14 +500,10 @@ fn number_binop(
     right: &Value,
     op: fn(f64, f64) -> f64,
     b: &BinaryExpr,
-) -> Result<Value, LoxError> {
+) -> Result<Value, RuntimeError> {
     match (left, right) {
         (Value::Number(a), Value::Number(c)) => Ok(Value::Number(op(*a, *c))),
-        _ => Err(LoxError::runtime(
-            "operands must be numbers",
-            b.span.offset,
-            b.span.len,
-        )),
+        _ => Err(RuntimeError::with_span("operands must be numbers", b.span)),
     }
 }
 
@@ -549,14 +512,10 @@ fn number_cmp(
     right: &Value,
     op: fn(f64, f64) -> bool,
     b: &BinaryExpr,
-) -> Result<Value, LoxError> {
+) -> Result<Value, RuntimeError> {
     match (left, right) {
         (Value::Number(a), Value::Number(c)) => Ok(Value::Bool(op(*a, *c))),
-        _ => Err(LoxError::runtime(
-            "operands must be numbers",
-            b.span.offset,
-            b.span.len,
-        )),
+        _ => Err(RuntimeError::with_span("operands must be numbers", b.span)),
     }
 }
 
@@ -581,7 +540,7 @@ mod tests {
         interp.output.clone()
     }
 
-    fn run_err(source: &str) -> LoxError {
+    fn run_err(source: &str) -> RuntimeError {
         let tokens = scanner::scan(source).expect("scan should succeed");
         let program = Parser::new(tokens).parse().expect("parse should succeed");
         let locals = Resolver::new()

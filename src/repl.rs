@@ -41,8 +41,9 @@ pub fn run_repl() {
         let tokens = match scanner::scan(&source) {
             Ok(t) => t,
             Err(errors) => {
-                for e in &errors {
-                    eprintln!("{e}");
+                for error in errors {
+                    let error_with_src = error.with_source_code("<repl>", &source);
+                    eprintln!("{:?}", miette::Report::new(error_with_src));
                 }
                 continue;
             }
@@ -51,8 +52,9 @@ pub fn run_repl() {
         let program = match Parser::new(tokens).parse() {
             Ok(p) => p,
             Err(errors) => {
-                for e in &errors {
-                    eprintln!("{e}");
+                for error in errors {
+                    let error_with_src = error.with_source_code("<repl>", &source);
+                    eprintln!("{:?}", miette::Report::new(error_with_src));
                 }
                 continue;
             }
@@ -61,16 +63,19 @@ pub fn run_repl() {
         let locals = match Resolver::new().resolve(&program) {
             Ok(l) => l,
             Err(errors) => {
-                for e in &errors {
-                    eprintln!("{e}");
+                for error in errors {
+                    let error_with_src = error.with_source_code("<repl>", &source);
+                    eprintln!("{:?}", miette::Report::new(error_with_src));
                 }
                 continue;
             }
         };
 
         interpreter.merge_locals(locals);
-        if let Err(e) = interpreter.interpret_additional(&program) {
-            eprintln!("{e}");
+        if let Err(e) = interpreter.interpret_additional(&program)
+            && !e.is_return()
+        {
+            eprintln!("{}", e.display_with_line(&source));
         }
     }
 }

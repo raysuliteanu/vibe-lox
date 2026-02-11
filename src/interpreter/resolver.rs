@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::ast::*;
-use crate::error::LoxError;
+use crate::error::CompileError;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum FunctionType {
@@ -23,7 +23,7 @@ pub struct Resolver {
     locals: HashMap<ExprId, usize>,
     current_function: FunctionType,
     current_class: ClassType,
-    errors: Vec<LoxError>,
+    errors: Vec<CompileError>,
 }
 
 impl Default for Resolver {
@@ -43,7 +43,10 @@ impl Resolver {
         }
     }
 
-    pub fn resolve(mut self, program: &Program) -> Result<HashMap<ExprId, usize>, Vec<LoxError>> {
+    pub fn resolve(
+        mut self,
+        program: &Program,
+    ) -> Result<HashMap<ExprId, usize>, Vec<CompileError>> {
         for decl in &program.declarations {
             self.resolve_decl(decl);
         }
@@ -65,7 +68,7 @@ impl Resolver {
     fn declare(&mut self, name: &str, span: crate::scanner::token::Span) {
         if let Some(scope) = self.scopes.last_mut() {
             if scope.contains_key(name) {
-                self.errors.push(LoxError::resolve(
+                self.errors.push(CompileError::resolve(
                     format!("variable '{name}' already declared in this scope"),
                     span.offset,
                     span.len,
@@ -114,7 +117,7 @@ impl Resolver {
 
                 if let Some(ref superclass) = c.superclass {
                     if *superclass == c.name {
-                        self.errors.push(LoxError::resolve(
+                        self.errors.push(CompileError::resolve(
                             "a class can't inherit from itself",
                             c.span.offset,
                             c.span.len,
@@ -175,7 +178,7 @@ impl Resolver {
             Stmt::Print(p) => self.resolve_expr(&p.expression),
             Stmt::Return(r) => {
                 if self.current_function == FunctionType::None {
-                    self.errors.push(LoxError::resolve(
+                    self.errors.push(CompileError::resolve(
                         "can't return from top-level code",
                         r.span.offset,
                         r.span.len,
@@ -183,7 +186,7 @@ impl Resolver {
                 }
                 if let Some(ref val) = r.value {
                     if self.current_function == FunctionType::Initializer {
-                        self.errors.push(LoxError::resolve(
+                        self.errors.push(CompileError::resolve(
                             "can't return a value from an initializer",
                             r.span.offset,
                             r.span.len,
@@ -219,7 +222,7 @@ impl Resolver {
                 if let Some(scope) = self.scopes.last()
                     && scope.get(&v.name) == Some(&false)
                 {
-                    self.errors.push(LoxError::resolve(
+                    self.errors.push(CompileError::resolve(
                         "can't read local variable in its own initializer",
                         v.span.offset,
                         v.span.len,
@@ -260,7 +263,7 @@ impl Resolver {
             }
             Expr::This(t) => {
                 if self.current_class == ClassType::None {
-                    self.errors.push(LoxError::resolve(
+                    self.errors.push(CompileError::resolve(
                         "can't use 'this' outside of a class",
                         t.span.offset,
                         t.span.len,
@@ -271,14 +274,14 @@ impl Resolver {
             Expr::Super(s) => {
                 match self.current_class {
                     ClassType::None => {
-                        self.errors.push(LoxError::resolve(
+                        self.errors.push(CompileError::resolve(
                             "can't use 'super' outside of a class",
                             s.span.offset,
                             s.span.len,
                         ));
                     }
                     ClassType::Class => {
-                        self.errors.push(LoxError::resolve(
+                        self.errors.push(CompileError::resolve(
                             "can't use 'super' in a class with no superclass",
                             s.span.offset,
                             s.span.len,

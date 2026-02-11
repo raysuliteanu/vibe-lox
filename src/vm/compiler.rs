@@ -1,5 +1,5 @@
 use crate::ast::*;
-use crate::error::LoxError;
+use crate::error::CompileError;
 use crate::vm::chunk::{Chunk, Constant, OpCode};
 
 #[derive(Debug, Clone)]
@@ -76,7 +76,7 @@ impl Compiler {
         }
     }
 
-    pub fn compile(mut self, program: &Program) -> Result<Chunk, LoxError> {
+    pub fn compile(mut self, program: &Program) -> Result<Chunk, CompileError> {
         for decl in &program.declarations {
             self.compile_decl(decl)?;
         }
@@ -215,7 +215,7 @@ impl Compiler {
         idx
     }
 
-    fn compile_decl(&mut self, decl: &Decl) -> Result<(), LoxError> {
+    fn compile_decl(&mut self, decl: &Decl) -> Result<(), CompileError> {
         match decl {
             Decl::Var(v) => {
                 self.current_mut().line = line_from_span(v.span);
@@ -260,7 +260,7 @@ impl Compiler {
         &mut self,
         function: &Function,
         func_type: FunctionType,
-    ) -> Result<(), LoxError> {
+    ) -> Result<(), CompileError> {
         self.states
             .push(CompilerState::new(function.name.clone(), func_type));
         self.begin_scope();
@@ -303,7 +303,7 @@ impl Compiler {
         Ok(())
     }
 
-    fn compile_class(&mut self, class: &ClassDecl) -> Result<(), LoxError> {
+    fn compile_class(&mut self, class: &ClassDecl) -> Result<(), CompileError> {
         self.current_mut().line = line_from_span(class.span);
         let name_idx = self
             .current_mut()
@@ -353,7 +353,7 @@ impl Compiler {
         Ok(())
     }
 
-    fn compile_stmt(&mut self, stmt: &Stmt) -> Result<(), LoxError> {
+    fn compile_stmt(&mut self, stmt: &Stmt) -> Result<(), CompileError> {
         match stmt {
             Stmt::Expression(e) => {
                 self.current_mut().line = line_from_span(e.span);
@@ -371,7 +371,7 @@ impl Compiler {
                 self.current_mut().line = line_from_span(r.span);
                 if let Some(ref val) = r.value {
                     if self.current().function_type == FunctionType::Initializer {
-                        return Err(LoxError::runtime(
+                        return Err(CompileError::resolve(
                             "can't return a value from an initializer",
                             r.span.offset,
                             r.span.len,
@@ -426,7 +426,7 @@ impl Compiler {
         }
     }
 
-    fn compile_expr(&mut self, expr: &Expr) -> Result<(), LoxError> {
+    fn compile_expr(&mut self, expr: &Expr) -> Result<(), CompileError> {
         match expr {
             Expr::Literal(l) => {
                 self.current_mut().line = line_from_span(l.span);
@@ -575,7 +575,7 @@ impl Compiler {
         }
     }
 
-    fn compile_named_variable(&mut self, name: &str) -> Result<(), LoxError> {
+    fn compile_named_variable(&mut self, name: &str) -> Result<(), CompileError> {
         if let Some(slot) = self.resolve_local(name) {
             self.emit_op(OpCode::GetLocal);
             self.emit_byte(slot);
@@ -612,13 +612,13 @@ mod tests {
     use crate::scanner;
     use crate::vm::chunk::OpCode;
 
-    fn compile(source: &str) -> Result<Chunk, LoxError> {
+    fn compile(source: &str) -> Result<Chunk, CompileError> {
         let tokens = scanner::scan(source).expect("scan should succeed");
         let program = Parser::new(tokens).parse().expect("parse should succeed");
         Compiler::new().compile(&program)
     }
 
-    fn compile_expr(source: &str) -> Result<Chunk, LoxError> {
+    fn compile_expr(source: &str) -> Result<Chunk, CompileError> {
         compile(&format!("print {source};"))
     }
 
@@ -788,10 +788,12 @@ mod tests {
         let chunk = compile("var x = 42;").expect("compile should succeed");
         assert!(has_opcode(&chunk, OpCode::DefineGlobal));
         // Should have constant for variable name "x"
-        assert!(chunk
-            .constants
-            .iter()
-            .any(|c| matches!(c, Constant::String(s) if s == "x")));
+        assert!(
+            chunk
+                .constants
+                .iter()
+                .any(|c| matches!(c, Constant::String(s) if s == "x"))
+        );
     }
 
     #[test]
@@ -1000,10 +1002,12 @@ mod tests {
     fn compile_class_declaration() {
         let chunk = compile("class Foo {}").expect("compile should succeed");
         assert!(has_opcode(&chunk, OpCode::Class));
-        assert!(chunk
-            .constants
-            .iter()
-            .any(|c| matches!(c, Constant::String(s) if s == "Foo")));
+        assert!(
+            chunk
+                .constants
+                .iter()
+                .any(|c| matches!(c, Constant::String(s) if s == "Foo"))
+        );
     }
 
     #[test]

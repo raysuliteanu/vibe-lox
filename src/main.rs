@@ -57,27 +57,35 @@ fn read_source(cli: &Cli) -> Result<String> {
     }
 }
 
+fn get_filename(cli: &Cli) -> String {
+    cli.file
+        .as_ref()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "<input>".to_string())
+}
+
 fn compile_source(source: &str) -> Result<chunk::Chunk> {
     vibe_lox::vm::compile_to_chunk(source).map_err(|e| anyhow::anyhow!("{e}"))
 }
 
-fn run_source(source: &str) -> Result<()> {
-    let tokens = scanner::scan(source).map_err(|e| report_lox_errors(&e))?;
+fn run_source(source: &str, filename: &str) -> Result<()> {
+    let tokens =
+        scanner::scan(source).map_err(|errors| report_compile_errors(errors, filename, source))?;
     let program = LoxParser::new(tokens)
         .parse()
-        .map_err(|e| report_lox_errors(&e))?;
+        .map_err(|errors| report_compile_errors(errors, filename, source))?;
     let locals = Resolver::new()
         .resolve(&program)
-        .map_err(|e| report_lox_errors(&e))?;
+        .map_err(|errors| report_compile_errors(errors, filename, source))?;
     let mut interpreter = Interpreter::new();
     interpreter
         .interpret(&program, locals)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+        .map_err(|e| report_runtime_error(&e, Some(source)))?;
     Ok(())
 }
 
 fn run_vm(source: &str) -> Result<()> {
-    vibe_lox::vm::interpret_vm(source).map_err(|e| anyhow::anyhow!("{e}"))
+    vibe_lox::vm::interpret_vm(source).map_err(|e| report_runtime_error(&e, None))
 }
 
 fn save_chunk(compiled: &chunk::Chunk, path: &PathBuf) -> Result<()> {
@@ -91,11 +99,39 @@ fn load_chunk(path: &PathBuf) -> Result<chunk::Chunk> {
     serde_json::from_slice(&bytes).context("deserialize bytecode from JSON")
 }
 
-fn report_lox_errors(errors: &[vibe_lox::error::LoxError]) -> anyhow::Error {
-    for e in errors {
-        eprintln!("{e}");
+fn report_compile_errors(
+    errors: Vec<vibe_lox::error::CompileError>,
+    filename: &str,
+    source: &str,
+) -> anyhow::Error {
+    let count = errors.len();
+    for error in errors {
+        let error_with_src = error.with_source_code(filename, source);
+        eprintln!("{:?}", miette::Report::new(error_with_src));
     }
-    anyhow::anyhow!("{} error(s)", errors.len())
+    anyhow::anyhow!("{} compile error(s)", count)
+}
+
+fn report_runtime_error(
+    error: &vibe_lox::error::RuntimeError,
+    source: Option<&str>,
+) -> anyhow::Error {
+    // Don't report Return as an error
+    if error.is_return() {
+        return anyhow::anyhow!("unexpected return at top level");
+    }
+
+    match source {
+        Some(src) => {
+            // Interpreter mode: show line number
+            eprintln!("{}", error.display_with_line(src));
+        }
+        None => {
+            // VM mode: no line number
+            eprintln!("{}", error);
+        }
+    }
+    anyhow::anyhow!("execution failed")
 }
 
 fn main() -> Result<()> {
@@ -103,7 +139,9 @@ fn main() -> Result<()> {
 
     if cli.dump_tokens {
         let source = read_source(&cli)?;
-        let tokens = scanner::scan(&source).map_err(|e| report_lox_errors(&e))?;
+        let filename = get_filename(&cli);
+        let tokens =
+            scanner::scan(&source).map_err(|e| report_compile_errors(e, &filename, &source))?;
         for token in &tokens {
             println!("{token}");
         }
@@ -112,10 +150,12 @@ fn main() -> Result<()> {
 
     if cli.dump_ast {
         let source = read_source(&cli)?;
-        let tokens = scanner::scan(&source).map_err(|e| report_lox_errors(&e))?;
+        let filename = get_filename(&cli);
+        let tokens =
+            scanner::scan(&source).map_err(|e| report_compile_errors(e, &filename, &source))?;
         let program = LoxParser::new(tokens)
             .parse()
-            .map_err(|e| report_lox_errors(&e))?;
+            .map_err(|e| report_compile_errors(e, &filename, &source))?;
         match cli.ast_format.as_str() {
             "json" => print!("{}", printer::to_json(&program)),
             _ => print!("{}", printer::to_sexp(&program)),
@@ -131,7 +171,8 @@ fn main() -> Result<()> {
             return Ok(());
         }
         let mut vm = vibe_lox::vm::vm::Vm::new();
-        vm.interpret(compiled).map_err(|e| anyhow::anyhow!("{e}"))?;
+        vm.interpret(compiled)
+            .map_err(|e| report_runtime_error(&e, None))?;
         return Ok(());
     }
 
@@ -170,7 +211,8 @@ fn main() -> Result<()> {
     match cli.file {
         Some(_) => {
             let source = read_source(&cli)?;
-            run_source(&source)?;
+            let filename = get_filename(&cli);
+            run_source(&source, &filename)?;
             Ok(())
         }
         None => {

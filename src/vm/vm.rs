@@ -4,7 +4,7 @@ use std::io::Write;
 use std::rc::Rc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::error::LoxError;
+use crate::error::RuntimeError;
 use crate::vm::chunk::{Chunk, Constant, OpCode};
 
 #[derive(Debug, Clone)]
@@ -147,7 +147,7 @@ impl Vm {
         &self.output
     }
 
-    pub fn interpret(&mut self, chunk: Chunk) -> Result<(), LoxError> {
+    pub fn interpret(&mut self, chunk: Chunk) -> Result<(), RuntimeError> {
         let function = Rc::new(VmFunction {
             name: "script".to_string(),
             arity: 0,
@@ -167,7 +167,7 @@ impl Vm {
         self.run()
     }
 
-    fn run(&mut self) -> Result<(), LoxError> {
+    fn run(&mut self) -> Result<(), RuntimeError> {
         loop {
             let frame_idx = self.frames.len() - 1;
             let ip = self.frames[frame_idx].ip;
@@ -206,19 +206,16 @@ impl Vm {
                 }
                 Some(OpCode::GetGlobal) => {
                     let name = self.read_string_constant();
-                    let value = self.globals.get(&name).cloned().ok_or_else(|| {
-                        LoxError::runtime(format!("undefined variable '{name}'"), 0, 0)
-                    })?;
+                    let value =
+                        self.globals.get(&name).cloned().ok_or_else(|| {
+                            RuntimeError::new(format!("undefined variable '{name}'"))
+                        })?;
                     self.stack.push(value);
                 }
                 Some(OpCode::SetGlobal) => {
                     let name = self.read_string_constant();
                     if !self.globals.contains_key(&name) {
-                        return Err(LoxError::runtime(
-                            format!("undefined variable '{name}'"),
-                            0,
-                            0,
-                        ));
+                        return Err(RuntimeError::new(format!("undefined variable '{name}'")));
                     }
                     let value = self.stack.last().expect("stack not empty").clone();
                     self.globals.insert(name, value);
@@ -268,15 +265,13 @@ impl Vm {
                                 }));
                                 self.stack.push(bound);
                             } else {
-                                return Err(LoxError::runtime(
-                                    format!("undefined property '{name}'"),
-                                    0,
-                                    0,
-                                ));
+                                return Err(RuntimeError::new(format!(
+                                    "undefined property '{name}'"
+                                )));
                             }
                         }
                         _ => {
-                            return Err(LoxError::runtime("only instances have properties", 0, 0));
+                            return Err(RuntimeError::new("only instances have properties"));
                         }
                     }
                 }
@@ -290,7 +285,7 @@ impl Vm {
                             self.stack.push(value);
                         }
                         _ => {
-                            return Err(LoxError::runtime("only instances have fields", 0, 0));
+                            return Err(RuntimeError::new("only instances have fields"));
                         }
                     }
                 }
@@ -304,11 +299,7 @@ impl Vm {
                                 VmValue::BoundMethod(Rc::new(VmBoundMethod { receiver, method }));
                             self.stack.push(bound);
                         } else {
-                            return Err(LoxError::runtime(
-                                format!("undefined property '{name}'"),
-                                0,
-                                0,
-                            ));
+                            return Err(RuntimeError::new(format!("undefined property '{name}'")));
                         }
                     }
                 }
@@ -334,10 +325,8 @@ impl Vm {
                             self.stack.push(VmValue::String(Rc::new(format!("{x}{y}"))));
                         }
                         _ => {
-                            return Err(LoxError::runtime(
+                            return Err(RuntimeError::new(
                                 "operands must be two numbers or two strings",
-                                0,
-                                0,
                             ));
                         }
                     }
@@ -360,7 +349,7 @@ impl Vm {
                     match val {
                         VmValue::Number(n) => self.stack.push(VmValue::Number(-n)),
                         _ => {
-                            return Err(LoxError::runtime("operand must be a number", 0, 0));
+                            return Err(RuntimeError::new("operand must be a number"));
                         }
                     }
                 }
@@ -404,7 +393,7 @@ impl Vm {
                             self.invoke_from_class(&class, &name, arg_count)?;
                         }
                     } else {
-                        return Err(LoxError::runtime("only instances have methods", 0, 0));
+                        return Err(RuntimeError::new("only instances have methods"));
                     }
                 }
                 Some(OpCode::SuperInvoke) => {
@@ -483,7 +472,7 @@ impl Vm {
                         sub.borrow_mut().methods.extend(methods);
                         self.stack.pop(); // pop subclass, leave super as local
                     } else {
-                        return Err(LoxError::runtime("superclass must be a class", 0, 0));
+                        return Err(RuntimeError::new("superclass must be a class"));
                     }
                 }
                 Some(OpCode::Method) => {
@@ -496,7 +485,7 @@ impl Vm {
                     }
                 }
                 None => {
-                    return Err(LoxError::runtime(format!("unknown opcode {op}"), 0, 0));
+                    return Err(RuntimeError::new(format!("unknown opcode {op}")));
                 }
             }
         }
@@ -529,7 +518,7 @@ impl Vm {
         &self.frames.last().expect("frame").closure.function.chunk
     }
 
-    fn binary_op(&mut self, op: fn(f64, f64) -> VmValue) -> Result<(), LoxError> {
+    fn binary_op(&mut self, op: fn(f64, f64) -> VmValue) -> Result<(), RuntimeError> {
         let b = self.stack.pop().expect("stack");
         let a = self.stack.pop().expect("stack");
         match (&a, &b) {
@@ -537,22 +526,18 @@ impl Vm {
                 self.stack.push(op(*x, *y));
                 Ok(())
             }
-            _ => Err(LoxError::runtime("operands must be numbers", 0, 0)),
+            _ => Err(RuntimeError::new("operands must be numbers")),
         }
     }
 
-    fn call_value(&mut self, callee: VmValue, arg_count: usize) -> Result<(), LoxError> {
+    fn call_value(&mut self, callee: VmValue, arg_count: usize) -> Result<(), RuntimeError> {
         match callee {
             VmValue::Closure(closure) => {
                 if arg_count != closure.function.arity {
-                    return Err(LoxError::runtime(
-                        format!(
-                            "expected {} arguments but got {arg_count}",
-                            closure.function.arity
-                        ),
-                        0,
-                        0,
-                    ));
+                    return Err(RuntimeError::new(format!(
+                        "expected {} arguments but got {arg_count}",
+                        closure.function.arity
+                    )));
                 }
                 let slot_offset = self.stack.len() - arg_count - 1;
                 self.frames.push(CallFrame {
@@ -588,14 +573,10 @@ impl Vm {
 
                 if let Some(init) = class.borrow().methods.get("init").cloned() {
                     if arg_count != init.function.arity {
-                        return Err(LoxError::runtime(
-                            format!(
-                                "expected {} arguments but got {arg_count}",
-                                init.function.arity
-                            ),
-                            0,
-                            0,
-                        ));
+                        return Err(RuntimeError::new(format!(
+                            "expected {} arguments but got {arg_count}",
+                            init.function.arity
+                        )));
                     }
                     self.frames.push(CallFrame {
                         closure: init,
@@ -603,11 +584,9 @@ impl Vm {
                         slot_offset,
                     });
                 } else if arg_count != 0 {
-                    return Err(LoxError::runtime(
-                        format!("expected 0 arguments but got {arg_count}"),
-                        0,
-                        0,
-                    ));
+                    return Err(RuntimeError::new(format!(
+                        "expected 0 arguments but got {arg_count}"
+                    )));
                 }
                 Ok(())
             }
@@ -615,14 +594,10 @@ impl Vm {
                 let slot_offset = self.stack.len() - arg_count - 1;
                 self.stack[slot_offset] = bm.receiver.clone();
                 if arg_count != bm.method.function.arity {
-                    return Err(LoxError::runtime(
-                        format!(
-                            "expected {} arguments but got {arg_count}",
-                            bm.method.function.arity
-                        ),
-                        0,
-                        0,
-                    ));
+                    return Err(RuntimeError::new(format!(
+                        "expected {} arguments but got {arg_count}",
+                        bm.method.function.arity
+                    )));
                 }
                 self.frames.push(CallFrame {
                     closure: Rc::clone(&bm.method),
@@ -631,11 +606,7 @@ impl Vm {
                 });
                 Ok(())
             }
-            _ => Err(LoxError::runtime(
-                "can only call functions and classes",
-                0,
-                0,
-            )),
+            _ => Err(RuntimeError::new("can only call functions and classes")),
         }
     }
 
@@ -644,13 +615,13 @@ impl Vm {
         class: &Rc<RefCell<VmClass>>,
         name: &str,
         arg_count: usize,
-    ) -> Result<(), LoxError> {
+    ) -> Result<(), RuntimeError> {
         let method = class
             .borrow()
             .methods
             .get(name)
             .cloned()
-            .ok_or_else(|| LoxError::runtime(format!("undefined property '{name}'"), 0, 0))?;
+            .ok_or_else(|| RuntimeError::new(format!("undefined property '{name}'")))?;
         let slot_offset = self.stack.len() - arg_count - 1;
         self.frames.push(CallFrame {
             closure: method,
@@ -753,7 +724,7 @@ mod tests {
         vm.output.clone()
     }
 
-    fn run_vm_err(source: &str) -> LoxError {
+    fn run_vm_err(source: &str) -> RuntimeError {
         let tokens = scanner::scan(source).expect("scan");
         let program = Parser::new(tokens).parse().expect("parse");
         let chunk = Compiler::new().compile(&program).expect("compile");
@@ -908,10 +879,7 @@ mod tests {
 
     #[test]
     fn vm_global_variables() {
-        assert_eq!(
-            run_vm("var a = 1; var b = 2; print a + b;"),
-            vec!["3"]
-        );
+        assert_eq!(run_vm("var a = 1; var b = 2; print a + b;"), vec!["3"]);
     }
 
     #[test]
@@ -947,17 +915,16 @@ mod tests {
 
     #[test]
     fn vm_nested_if() {
-        assert_eq!(
-            run_vm("if (true) { if (true) print 1; }"),
-            vec!["1"]
-        );
+        assert_eq!(run_vm("if (true) { if (true) print 1; }"), vec!["1"]);
     }
 
     #[test]
     fn vm_while_with_break_simulation() {
         // Lox doesn't have break, but we can test loop exit via condition
         assert_eq!(
-            run_vm("var i = 0; var done = false; while (!done) { print i; i = i + 1; if (i >= 3) done = true; }"),
+            run_vm(
+                "var i = 0; var done = false; while (!done) { print i; i = i + 1; if (i >= 3) done = true; }"
+            ),
             vec!["0", "1", "2"]
         );
     }
@@ -965,7 +932,9 @@ mod tests {
     #[test]
     fn vm_nested_loops() {
         assert_eq!(
-            run_vm("for (var i = 0; i < 2; i = i + 1) { for (var j = 0; j < 2; j = j + 1) { print i * 10 + j; } }"),
+            run_vm(
+                "for (var i = 0; i < 2; i = i + 1) { for (var j = 0; j < 2; j = j + 1) { print i * 10 + j; } }"
+            ),
             vec!["0", "1", "10", "11"]
         );
     }
@@ -990,10 +959,7 @@ mod tests {
 
     #[test]
     fn vm_function_no_return() {
-        assert_eq!(
-            run_vm("fun test() { 42; } print test();"),
-            vec!["nil"]
-        );
+        assert_eq!(run_vm("fun test() { 42; } print test();"), vec!["nil"]);
     }
 
     #[test]
@@ -1007,7 +973,9 @@ mod tests {
     #[test]
     fn vm_recursive_function() {
         assert_eq!(
-            run_vm("fun countdown(n) { if (n <= 0) return; print n; countdown(n - 1); } countdown(3);"),
+            run_vm(
+                "fun countdown(n) { if (n <= 0) return; print n; countdown(n - 1); } countdown(3);"
+            ),
             vec!["3", "2", "1"]
         );
     }
@@ -1033,7 +1001,9 @@ mod tests {
     #[test]
     fn vm_simple_closure() {
         assert_eq!(
-            run_vm("fun outer() { var x = 1; fun inner() { return x; } return inner; } var f = outer(); print f();"),
+            run_vm(
+                "fun outer() { var x = 1; fun inner() { return x; } return inner; } var f = outer(); print f();"
+            ),
             vec!["1"]
         );
     }
@@ -1041,7 +1011,9 @@ mod tests {
     #[test]
     fn vm_closure_mutates_captured_var() {
         assert_eq!(
-            run_vm("fun outer() { var x = 0; fun inner() { x = x + 1; return x; } return inner; } var f = outer(); print f(); print f();"),
+            run_vm(
+                "fun outer() { var x = 0; fun inner() { x = x + 1; return x; } return inner; } var f = outer(); print f(); print f();"
+            ),
             vec!["1", "2"]
         );
     }
@@ -1049,7 +1021,8 @@ mod tests {
     #[test]
     fn vm_multiple_closures_share_variable() {
         assert_eq!(
-            run_vm(r#"
+            run_vm(
+                r#"
                 fun outer() {
                     var x = 0;
                     fun inc() { x = x + 1; return x; }
@@ -1058,7 +1031,8 @@ mod tests {
                     print get();
                 }
                 outer();
-            "#),
+            "#
+            ),
             vec!["1"]
         );
     }
@@ -1116,7 +1090,9 @@ mod tests {
     #[test]
     fn vm_class_inheritance() {
         assert_eq!(
-            run_vm("class Base { method() { return \"base\"; } } class Derived < Base {} var d = Derived(); print d.method();"),
+            run_vm(
+                "class Base { method() { return \"base\"; } } class Derived < Base {} var d = Derived(); print d.method();"
+            ),
             vec!["base"]
         );
     }
@@ -1124,7 +1100,9 @@ mod tests {
     #[test]
     fn vm_class_method_override() {
         assert_eq!(
-            run_vm("class Base { method() { return \"base\"; } } class Derived < Base { method() { return \"derived\"; } } var d = Derived(); print d.method();"),
+            run_vm(
+                "class Base { method() { return \"base\"; } } class Derived < Base { method() { return \"derived\"; } } var d = Derived(); print d.method();"
+            ),
             vec!["derived"]
         );
     }
@@ -1132,14 +1110,16 @@ mod tests {
     #[test]
     fn vm_class_super_call() {
         assert_eq!(
-            run_vm(r#"
+            run_vm(
+                r#"
                 class Base { greet() { return "hello"; } }
                 class Derived < Base {
                     greet() { return super.greet(); }
                 }
                 var d = Derived();
                 print d.greet();
-            "#),
+            "#
+            ),
             vec!["hello"]
         );
     }
@@ -1251,15 +1231,15 @@ mod tests {
 
     #[test]
     fn vm_empty_string_truthy() {
-        assert_eq!(run_vm("if (\"\") print \"yes\"; else print \"no\";"), vec!["yes"]);
+        assert_eq!(
+            run_vm("if (\"\") print \"yes\"; else print \"no\";"),
+            vec!["yes"]
+        );
     }
 
     #[test]
     fn vm_multiple_statements() {
-        assert_eq!(
-            run_vm("print 1; print 2; print 3;"),
-            vec!["1", "2", "3"]
-        );
+        assert_eq!(run_vm("print 1; print 2; print 3;"), vec!["1", "2", "3"]);
     }
 
     #[test]

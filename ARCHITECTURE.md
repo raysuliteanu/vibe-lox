@@ -908,78 +908,170 @@ Side effects + result
 
 ## Error Handling Architecture
 
-### Error Type Hierarchy
+### Two-Tier Error System
+
+vibe-lox uses a clean separation between compile-time and runtime errors:
+
+1. **CompileError** - For scanner, parser, resolver (with miette diagnostics and source context)
+2. **RuntimeError** - For interpreter and VM runtime errors (simple display, optional line numbers)
+
+This separation provides:
+- Appropriate level of detail for each error type
+- Rich diagnostics where source code is available
+- Zero overhead for line number tracking (only calculated when displaying errors)
+- No trait bound conflicts (RuntimeError doesn't need Send + Sync)
+
+### CompileError (Compile-Time)
+
+**Used for:** Scanner, Parser, Resolver
 
 ```rust
-// Domain errors - user-facing
-#[derive(Error, Diagnostic, Debug)]
-pub enum LoxError {
+#[derive(Error, Debug, Diagnostic)]
+pub enum CompileError {
     #[error("scan error: {message}")]
-    ScanError {
+    #[diagnostic(code(lox::scan))]
+    Scan {
         message: String,
         #[label("here")]
         span: SourceSpan,
+        #[source_code]
+        src: miette::NamedSource<String>,
     },
     
     #[error("parse error: {message}")]
-    ParseError {
+    #[diagnostic(code(lox::parse))]
+    Parse {
         message: String,
         #[label("here")]
         span: SourceSpan,
+        #[source_code]
+        src: miette::NamedSource<String>,
     },
     
     #[error("resolution error: {message}")]
-    ResolveError {
+    #[diagnostic(code(lox::resolve))]
+    Resolve {
         message: String,
         #[label("here")]
         span: SourceSpan,
+        #[source_code]
+        src: miette::NamedSource<String>,
     },
-    
-    #[error("runtime error: {message}")]
-    RuntimeError {
-        message: String,
-        #[label("here")]
-        span: SourceSpan,
-    },
-    
-    #[error("return")]
-    Return(Value),  // Control flow, not a real error
 }
 
 // Helper constructors
-impl LoxError {
+impl CompileError {
     pub fn scan(message: impl Into<String>, offset: usize, len: usize) -> Self
     pub fn parse(message: impl Into<String>, offset: usize, len: usize) -> Self
     pub fn resolve(message: impl Into<String>, offset: usize, len: usize) -> Self
-    pub fn runtime(message: impl Into<String>, offset: usize, len: usize) -> Self
+    pub fn with_source_code(self, name: impl Into<String>, source: impl Into<String>) -> Self
 }
 ```
 
-### Error Display
-
-**Using `miette` for rich terminal output:**
-
+**Example output:**
 ```
-Error: runtime error: undefined variable 'x'
-  ┌─ test.lox:3:7
-  │
-3 │ print x;
-  │       ^ here
+lox::parse
+
+  × parse error: expected ';' after expression, found 'print'
+   ╭─[tmp/counter2.lox:8:5]
+ 7 │     j = i
+ 8 │     print i;
+   ·     ──┬──
+   ·       ╰── here
+ 9 │   }
+   ╰────
 ```
 
-**Multiple errors:**
+### RuntimeError (Runtime Execution)
+
+**Used for:** Interpreter and VM runtime errors
+
 ```rust
-// Scanner and parser collect errors, report all at once
-pub fn scan(source: &str) -> Result<Vec<Token>, Vec<LoxError>>
-pub fn parse(tokens: Vec<Token>) -> Result<Program, Vec<LoxError>>
-
-// Main.rs combines them:
-fn report_lox_errors(errors: &[LoxError]) -> anyhow::Error {
-    for e in errors {
-        eprintln!("{e}");  // miette formats each error
-    }
-    anyhow::anyhow!("{} error(s)", errors.len())
+#[derive(Error, Debug)]
+pub enum RuntimeError {
+    #[error("Error: {message}")]
+    Error {
+        message: String,
+        span: Option<Span>,  // Only available in interpreter mode
+    },
+    
+    #[error("return")]
+    Return {
+        value: Value,  // Control flow, not really an error
+    },
 }
+
+impl RuntimeError {
+    pub fn new(message: impl Into<String>) -> Self
+    pub fn with_span(message: impl Into<String>, span: Span) -> Self
+    pub fn display_with_line(&self, source: &str) -> String
+    pub fn is_return(&self) -> bool
+    pub fn into_return_value(self) -> Option<Value>
+}
+```
+
+**Example output (interpreter with source):**
+```
+Error: line 3: operands must be two numbers or two strings
+```
+
+**Example output (VM without source):**
+```
+Error: operands must be numbers
+```
+
+### Line Number Calculation
+
+For interpreter mode, line numbers are calculated on-demand when displaying errors:
+
+```rust
+fn offset_to_line(source: &str, offset: usize) -> usize {
+    source[..offset.min(source.len())]
+        .chars()
+        .filter(|&c| c == '\n')
+        .count()
+        + 1
+}
+```
+
+**Design rationale:**
+- Only called when displaying errors (not during execution)
+- Simple linear scan - acceptable performance for error cases
+- Allows keeping `Span` simple (just offset + len, no line/column)
+- Interpreter can show line numbers, VM can't (and that's okay)
+
+### When to Use Each Error Type
+
+| Situation | Error Type | Has Source Context? | Shows Line Number? |
+|-----------|------------|---------------------|-------------------|
+| Lexical error | `CompileError::Scan` | Yes (miette) | Yes (miette) |
+| Syntax error | `CompileError::Parse` | Yes (miette) | Yes (miette) |
+| Semantic error | `CompileError::Resolve` | Yes (miette) | Yes (miette) |
+| Interpreter runtime | `RuntimeError::Error` | Optional span | Yes (calculated) |
+| VM runtime | `RuntimeError::Error` | No span | No |
+| Function return | `RuntimeError::Return` | N/A | N/A (control flow) |
+
+### Error Display Format
+
+All errors start with "Error:" for consistency:
+
+**Compile errors (miette):**
+```
+lox::parse
+
+  × parse error: expected ';' after expression
+   ╭─[test.lox:3:5]
+   ...
+```
+
+**Runtime errors (interpreter):**
+```
+Error: line 42: undefined variable 'x'
+```
+
+**Runtime errors (VM):**
+```
+Error: operands must be numbers
 ```
 
 ### Error Recovery
@@ -989,6 +1081,43 @@ fn report_lox_errors(errors: &[LoxError]) -> anyhow::Error {
 3. **Resolver:** Continues checking, collects all semantic errors
 4. **Interpreter:** Stops at first error, unwinds with `Result`
 5. **VM:** Stops at first error (runtime errors can't recover)
+
+### Implementation Guidelines
+
+**Creating compile errors:**
+```rust
+// Requires offset and length from span
+CompileError::parse("expected ';'", token.span.offset, token.span.len)
+    .with_source_code(filename, source_code)
+```
+
+**Creating runtime errors:**
+```rust
+// Interpreter - with span:
+RuntimeError::with_span("type error", expr.span)
+
+// Interpreter or VM - without span:
+RuntimeError::new("undefined variable 'x'")
+
+// Return value (control flow):
+RuntimeError::Return { value }
+```
+
+**Displaying errors:**
+```rust
+// Compile errors (main.rs):
+for error in errors {
+    let error_with_src = error.with_source_code(filename, source);
+    eprintln!("{:?}", miette::Report::new(error_with_src));
+}
+
+// Runtime errors (main.rs):
+if let Some(source) = source_code {
+    eprintln!("{}", error.display_with_line(source));  // Interpreter
+} else {
+    eprintln!("{}", error);  // VM
+}
+```
 
 ---
 

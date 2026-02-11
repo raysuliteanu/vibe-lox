@@ -4,7 +4,7 @@ use winnow::prelude::*;
 use winnow::stream::{LocatingSlice, Location};
 use winnow::token::{any, take_while};
 
-use crate::error::LoxError;
+use crate::error::CompileError;
 use crate::scanner::token::{Span, Token, TokenKind, keyword_kind};
 
 type Input<'a> = LocatingSlice<&'a str>;
@@ -159,7 +159,7 @@ fn scan_token<'a>(input: &mut Input<'a>) -> ModalResult<Token> {
 }
 
 /// Scan all tokens from source, returning either a token list or scan errors.
-pub fn scan_all(source: &str) -> Result<Vec<Token>, Vec<LoxError>> {
+pub fn scan_all(source: &str) -> Result<Vec<Token>, Vec<CompileError>> {
     let mut input = LocatingSlice::new(source);
     let mut tokens = Vec::new();
     let mut errors = Vec::new();
@@ -177,7 +177,7 @@ pub fn scan_all(source: &str) -> Result<Vec<Token>, Vec<LoxError>> {
                 let offset = input.current_token_start();
                 let c = any::<_, ContextError>.parse_next(&mut input).ok();
                 let ch = c.unwrap_or('?');
-                errors.push(LoxError::scan(
+                errors.push(CompileError::scan(
                     format!("unexpected character '{ch}'"),
                     offset,
                     1,
