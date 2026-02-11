@@ -859,4 +859,412 @@ mod tests {
         let err = run_vm_err("print x;");
         assert!(err.to_string().contains("undefined variable"));
     }
+
+    // ========== Additional VM Execution Tests ==========
+
+    // ========== Boolean and Comparison Operations ==========
+
+    #[test]
+    fn vm_comparison_less() {
+        assert_eq!(run_vm("print 1 < 2;"), vec!["true"]);
+        assert_eq!(run_vm("print 2 < 1;"), vec!["false"]);
+    }
+
+    #[test]
+    fn vm_comparison_greater() {
+        assert_eq!(run_vm("print 2 > 1;"), vec!["true"]);
+        assert_eq!(run_vm("print 1 > 2;"), vec!["false"]);
+    }
+
+    #[test]
+    fn vm_comparison_equal() {
+        assert_eq!(run_vm("print 1 == 1;"), vec!["true"]);
+        assert_eq!(run_vm("print 1 == 2;"), vec!["false"]);
+        assert_eq!(run_vm("print nil == nil;"), vec!["true"]);
+    }
+
+    #[test]
+    fn vm_comparison_not_equal() {
+        assert_eq!(run_vm("print 1 != 2;"), vec!["true"]);
+        assert_eq!(run_vm("print 1 != 1;"), vec!["false"]);
+    }
+
+    #[test]
+    fn vm_boolean_not() {
+        assert_eq!(run_vm("print !true;"), vec!["false"]);
+        assert_eq!(run_vm("print !false;"), vec!["true"]);
+        assert_eq!(run_vm("print !nil;"), vec!["true"]);
+    }
+
+    #[test]
+    fn vm_truthiness() {
+        assert_eq!(run_vm("if (false) print 1; else print 2;"), vec!["2"]);
+        assert_eq!(run_vm("if (nil) print 1; else print 2;"), vec!["2"]);
+        assert_eq!(run_vm("if (0) print 1; else print 2;"), vec!["1"]);
+        assert_eq!(run_vm("if (\"\") print 1; else print 2;"), vec!["1"]);
+    }
+
+    // ========== Variable Scoping ==========
+
+    #[test]
+    fn vm_global_variables() {
+        assert_eq!(
+            run_vm("var a = 1; var b = 2; print a + b;"),
+            vec!["3"]
+        );
+    }
+
+    #[test]
+    fn vm_local_variables_in_block() {
+        assert_eq!(run_vm("{ var x = 5; print x; }"), vec!["5"]);
+    }
+
+    #[test]
+    fn vm_variable_shadowing() {
+        assert_eq!(
+            run_vm("var x = 1; { var x = 2; { var x = 3; print x; } print x; } print x;"),
+            vec!["3", "2", "1"]
+        );
+    }
+
+    #[test]
+    fn vm_global_reassignment() {
+        assert_eq!(run_vm("var x = 1; x = 2; print x;"), vec!["2"]);
+    }
+
+    #[test]
+    fn vm_local_reassignment() {
+        assert_eq!(run_vm("{ var x = 1; x = 2; print x; }"), vec!["2"]);
+    }
+
+    // ========== Control Flow ==========
+
+    #[test]
+    fn vm_if_without_else() {
+        assert_eq!(run_vm("if (true) print 1;"), vec!["1"]);
+        assert_eq!(run_vm("if (false) print 1;"), Vec::<String>::new());
+    }
+
+    #[test]
+    fn vm_nested_if() {
+        assert_eq!(
+            run_vm("if (true) { if (true) print 1; }"),
+            vec!["1"]
+        );
+    }
+
+    #[test]
+    fn vm_while_with_break_simulation() {
+        // Lox doesn't have break, but we can test loop exit via condition
+        assert_eq!(
+            run_vm("var i = 0; var done = false; while (!done) { print i; i = i + 1; if (i >= 3) done = true; }"),
+            vec!["0", "1", "2"]
+        );
+    }
+
+    #[test]
+    fn vm_nested_loops() {
+        assert_eq!(
+            run_vm("for (var i = 0; i < 2; i = i + 1) { for (var j = 0; j < 2; j = j + 1) { print i * 10 + j; } }"),
+            vec!["0", "1", "10", "11"]
+        );
+    }
+
+    // ========== Functions ==========
+
+    #[test]
+    fn vm_function_no_params() {
+        assert_eq!(
+            run_vm("fun greet() { return \"hello\"; } print greet();"),
+            vec!["hello"]
+        );
+    }
+
+    #[test]
+    fn vm_function_multiple_params() {
+        assert_eq!(
+            run_vm("fun add3(a, b, c) { return a + b + c; } print add3(1, 2, 3);"),
+            vec!["6"]
+        );
+    }
+
+    #[test]
+    fn vm_function_no_return() {
+        assert_eq!(
+            run_vm("fun test() { 42; } print test();"),
+            vec!["nil"]
+        );
+    }
+
+    #[test]
+    fn vm_function_early_return() {
+        assert_eq!(
+            run_vm("fun test() { return 1; return 2; } print test();"),
+            vec!["1"]
+        );
+    }
+
+    #[test]
+    fn vm_recursive_function() {
+        assert_eq!(
+            run_vm("fun countdown(n) { if (n <= 0) return; print n; countdown(n - 1); } countdown(3);"),
+            vec!["3", "2", "1"]
+        );
+    }
+
+    #[test]
+    fn vm_nested_function_calls() {
+        assert_eq!(
+            run_vm("fun double(x) { return x * 2; } print double(double(5));"),
+            vec!["20"]
+        );
+    }
+
+    #[test]
+    fn vm_function_as_value() {
+        assert_eq!(
+            run_vm("fun identity(x) { return x; } var f = identity; print f(42);"),
+            vec!["42"]
+        );
+    }
+
+    // ========== Closures ==========
+
+    #[test]
+    fn vm_simple_closure() {
+        assert_eq!(
+            run_vm("fun outer() { var x = 1; fun inner() { return x; } return inner; } var f = outer(); print f();"),
+            vec!["1"]
+        );
+    }
+
+    #[test]
+    fn vm_closure_mutates_captured_var() {
+        assert_eq!(
+            run_vm("fun outer() { var x = 0; fun inner() { x = x + 1; return x; } return inner; } var f = outer(); print f(); print f();"),
+            vec!["1", "2"]
+        );
+    }
+
+    #[test]
+    fn vm_multiple_closures_share_variable() {
+        assert_eq!(
+            run_vm(r#"
+                fun outer() {
+                    var x = 0;
+                    fun inc() { x = x + 1; return x; }
+                    fun get() { return x; }
+                    inc();
+                    print get();
+                }
+                outer();
+            "#),
+            vec!["1"]
+        );
+    }
+
+    // ========== Classes ==========
+
+    #[test]
+    fn vm_class_instantiation() {
+        assert_eq!(
+            run_vm("class Foo {} var foo = Foo(); print foo;"),
+            vec!["Foo instance"]
+        );
+    }
+
+    #[test]
+    fn vm_class_field_get_set() {
+        assert_eq!(
+            run_vm("class Foo {} var f = Foo(); f.bar = \"baz\"; print f.bar;"),
+            vec!["baz"]
+        );
+    }
+
+    #[test]
+    fn vm_class_method() {
+        assert_eq!(
+            run_vm("class Foo { greet() { return \"hello\"; } } var f = Foo(); print f.greet();"),
+            vec!["hello"]
+        );
+    }
+
+    #[test]
+    fn vm_class_this() {
+        assert_eq!(
+            run_vm("class Foo { getThis() { return this; } } var f = Foo(); print f.getThis();"),
+            vec!["Foo instance"]
+        );
+    }
+
+    #[test]
+    fn vm_class_initializer() {
+        assert_eq!(
+            run_vm("class Foo { init(x) { this.x = x; } } var f = Foo(42); print f.x;"),
+            vec!["42"]
+        );
+    }
+
+    #[test]
+    fn vm_class_initializer_returns_instance() {
+        assert_eq!(
+            run_vm("class Foo { init() { } } var f = Foo(); print f;"),
+            vec!["Foo instance"]
+        );
+    }
+
+    #[test]
+    fn vm_class_inheritance() {
+        assert_eq!(
+            run_vm("class Base { method() { return \"base\"; } } class Derived < Base {} var d = Derived(); print d.method();"),
+            vec!["base"]
+        );
+    }
+
+    #[test]
+    fn vm_class_method_override() {
+        assert_eq!(
+            run_vm("class Base { method() { return \"base\"; } } class Derived < Base { method() { return \"derived\"; } } var d = Derived(); print d.method();"),
+            vec!["derived"]
+        );
+    }
+
+    #[test]
+    fn vm_class_super_call() {
+        assert_eq!(
+            run_vm(r#"
+                class Base { greet() { return "hello"; } }
+                class Derived < Base {
+                    greet() { return super.greet(); }
+                }
+                var d = Derived();
+                print d.greet();
+            "#),
+            vec!["hello"]
+        );
+    }
+
+    // ========== Error Cases ==========
+
+    #[test]
+    fn vm_undefined_global_get() {
+        let err = run_vm_err("print x;");
+        assert!(err.to_string().contains("undefined variable"));
+    }
+
+    #[test]
+    fn vm_undefined_global_set() {
+        let err = run_vm_err("x = 1;");
+        assert!(err.to_string().contains("undefined variable"));
+    }
+
+    #[test]
+    fn vm_wrong_arity_too_few() {
+        let err = run_vm_err("fun f(a, b) {} f(1);");
+        assert!(err.to_string().contains("expected 2"));
+    }
+
+    #[test]
+    fn vm_wrong_arity_too_many() {
+        let err = run_vm_err("fun f(a) {} f(1, 2);");
+        assert!(err.to_string().contains("expected 1"));
+    }
+
+    #[test]
+    fn vm_call_non_function() {
+        let err = run_vm_err("var x = 42; x();");
+        assert!(err.to_string().contains("can only call"));
+    }
+
+    #[test]
+    fn vm_type_error_negate_string() {
+        let err = run_vm_err("print -\"hello\";");
+        assert!(err.to_string().contains("operand must be a number"));
+    }
+
+    #[test]
+    fn vm_type_error_add_number_bool() {
+        let err = run_vm_err("print 1 + true;");
+        assert!(err.to_string().contains("operands must be"));
+    }
+
+    #[test]
+    fn vm_type_error_subtract_strings() {
+        let err = run_vm_err("print \"a\" - \"b\";");
+        assert!(err.to_string().contains("operands must be numbers"));
+    }
+
+    #[test]
+    fn vm_undefined_property() {
+        let err = run_vm_err("class Foo {} var f = Foo(); print f.bar;");
+        assert!(err.to_string().contains("undefined property"));
+    }
+
+    #[test]
+    fn vm_property_on_non_instance() {
+        let err = run_vm_err("var x = 42; print x.foo;");
+        assert!(err.to_string().contains("only instances have properties"));
+    }
+
+    #[test]
+    fn vm_set_property_on_non_instance() {
+        let err = run_vm_err("var x = 42; x.foo = 1;");
+        assert!(err.to_string().contains("only instances have fields"));
+    }
+
+    #[test]
+    fn vm_inherit_from_non_class() {
+        let err = run_vm_err("var NotAClass = 42; class Foo < NotAClass {}");
+        assert!(err.to_string().contains("superclass must be a class"));
+    }
+
+    // ========== Native Functions ==========
+
+    #[test]
+    fn vm_clock_function() {
+        let output = run_vm("print clock();");
+        assert_eq!(output.len(), 1);
+        // Clock should return a number (unix timestamp)
+        assert!(output[0].parse::<f64>().is_ok());
+    }
+
+    // ========== Edge Cases ==========
+
+    #[test]
+    fn vm_string_equality() {
+        assert_eq!(run_vm("print \"hello\" == \"hello\";"), vec!["true"]);
+        assert_eq!(run_vm("print \"hello\" == \"world\";"), vec!["false"]);
+    }
+
+    #[test]
+    fn vm_nil_operations() {
+        assert_eq!(run_vm("print nil == nil;"), vec!["true"]);
+        assert_eq!(run_vm("print nil == false;"), vec!["false"]);
+        assert_eq!(run_vm("print !nil;"), vec!["true"]);
+    }
+
+    #[test]
+    fn vm_zero_and_false_distinct() {
+        assert_eq!(run_vm("print 0 == false;"), vec!["false"]);
+        assert_eq!(run_vm("print 0 == 0;"), vec!["true"]);
+    }
+
+    #[test]
+    fn vm_empty_string_truthy() {
+        assert_eq!(run_vm("if (\"\") print \"yes\"; else print \"no\";"), vec!["yes"]);
+    }
+
+    #[test]
+    fn vm_multiple_statements() {
+        assert_eq!(
+            run_vm("print 1; print 2; print 3;"),
+            vec!["1", "2", "3"]
+        );
+    }
+
+    #[test]
+    fn vm_expression_statements() {
+        // Expression statements should not print
+        assert_eq!(run_vm("1 + 2; \"hello\"; 3;"), Vec::<String>::new());
+    }
 }

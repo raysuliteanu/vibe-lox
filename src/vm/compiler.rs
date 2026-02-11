@@ -604,3 +604,569 @@ fn line_from_span(span: crate::scanner::token::Span) -> usize {
     // We don't have line info in spans, so use offset as a proxy
     span.offset + 1
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parser::Parser;
+    use crate::scanner;
+    use crate::vm::chunk::OpCode;
+
+    fn compile(source: &str) -> Result<Chunk, LoxError> {
+        let tokens = scanner::scan(source).expect("scan should succeed");
+        let program = Parser::new(tokens).parse().expect("parse should succeed");
+        Compiler::new().compile(&program)
+    }
+
+    fn compile_expr(source: &str) -> Result<Chunk, LoxError> {
+        compile(&format!("print {source};"))
+    }
+
+    fn has_opcode(chunk: &Chunk, op: OpCode) -> bool {
+        chunk.code.iter().any(|&byte| byte == op as u8)
+    }
+
+    fn count_opcode(chunk: &Chunk, op: OpCode) -> usize {
+        chunk.code.iter().filter(|&&byte| byte == op as u8).count()
+    }
+
+    /// Check if any function constant (recursively) has the specified upvalue count
+    fn has_function_with_upvalues(chunk: &Chunk) -> bool {
+        for constant in &chunk.constants {
+            match constant {
+                Constant::Function {
+                    upvalue_count,
+                    chunk: nested_chunk,
+                    ..
+                } => {
+                    if *upvalue_count > 0 {
+                        return true;
+                    }
+                    // Check nested functions
+                    if has_function_with_upvalues(nested_chunk) {
+                        return true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
+    // ========== Basic Compilation Tests ==========
+
+    #[test]
+    fn compile_number_literal() {
+        let chunk = compile_expr("42").expect("compile should succeed");
+        assert!(has_opcode(&chunk, OpCode::Constant));
+        assert_eq!(chunk.constants.len(), 1);
+        assert_eq!(chunk.constants[0], Constant::Number(42.0));
+    }
+
+    #[test]
+    fn compile_string_literal() {
+        let chunk = compile_expr("\"hello\"").expect("compile should succeed");
+        assert!(has_opcode(&chunk, OpCode::Constant));
+        assert!(matches!(
+            &chunk.constants[0],
+            Constant::String(s) if s == "hello"
+        ));
+    }
+
+    #[test]
+    fn compile_true_literal() {
+        let chunk = compile_expr("true").expect("compile should succeed");
+        assert!(has_opcode(&chunk, OpCode::True));
+    }
+
+    #[test]
+    fn compile_false_literal() {
+        let chunk = compile_expr("false").expect("compile should succeed");
+        assert!(has_opcode(&chunk, OpCode::False));
+    }
+
+    #[test]
+    fn compile_nil_literal() {
+        let chunk = compile_expr("nil").expect("compile should succeed");
+        // Should have Nil from the expression plus Nil and Return at end
+        assert!(has_opcode(&chunk, OpCode::Nil));
+    }
+
+    // ========== Arithmetic Operations ==========
+
+    #[test]
+    fn compile_addition() {
+        let chunk = compile_expr("1 + 2").expect("compile should succeed");
+        assert!(has_opcode(&chunk, OpCode::Add));
+        // Should have at least 2 number constants
+        let num_constants = chunk
+            .constants
+            .iter()
+            .filter(|c| matches!(c, Constant::Number(_)))
+            .count();
+        assert!(num_constants >= 2);
+    }
+
+    #[test]
+    fn compile_subtraction() {
+        let chunk = compile_expr("5 - 3").expect("compile should succeed");
+        assert!(has_opcode(&chunk, OpCode::Subtract));
+    }
+
+    #[test]
+    fn compile_multiplication() {
+        let chunk = compile_expr("2 * 3").expect("compile should succeed");
+        assert!(has_opcode(&chunk, OpCode::Multiply));
+    }
+
+    #[test]
+    fn compile_division() {
+        let chunk = compile_expr("10 / 2").expect("compile should succeed");
+        assert!(has_opcode(&chunk, OpCode::Divide));
+    }
+
+    #[test]
+    fn compile_negation() {
+        let chunk = compile_expr("-42").expect("compile should succeed");
+        assert!(has_opcode(&chunk, OpCode::Negate));
+    }
+
+    #[test]
+    fn compile_not() {
+        let chunk = compile_expr("!true").expect("compile should succeed");
+        assert!(has_opcode(&chunk, OpCode::Not));
+    }
+
+    // ========== Comparison Operations ==========
+
+    #[test]
+    fn compile_equal() {
+        let chunk = compile_expr("1 == 2").expect("compile should succeed");
+        assert!(has_opcode(&chunk, OpCode::Equal));
+    }
+
+    #[test]
+    fn compile_not_equal() {
+        let chunk = compile_expr("1 != 2").expect("compile should succeed");
+        // != is compiled as == followed by Not
+        assert!(has_opcode(&chunk, OpCode::Equal));
+        assert!(has_opcode(&chunk, OpCode::Not));
+    }
+
+    #[test]
+    fn compile_less_than() {
+        let chunk = compile_expr("1 < 2").expect("compile should succeed");
+        assert!(has_opcode(&chunk, OpCode::Less));
+    }
+
+    #[test]
+    fn compile_less_equal() {
+        let chunk = compile_expr("1 <= 2").expect("compile should succeed");
+        // <= is compiled as > followed by Not
+        assert!(has_opcode(&chunk, OpCode::Greater));
+        assert!(has_opcode(&chunk, OpCode::Not));
+    }
+
+    #[test]
+    fn compile_greater_than() {
+        let chunk = compile_expr("1 > 2").expect("compile should succeed");
+        assert!(has_opcode(&chunk, OpCode::Greater));
+    }
+
+    #[test]
+    fn compile_greater_equal() {
+        let chunk = compile_expr("1 >= 2").expect("compile should succeed");
+        // >= is compiled as < followed by Not
+        assert!(has_opcode(&chunk, OpCode::Less));
+        assert!(has_opcode(&chunk, OpCode::Not));
+    }
+
+    // ========== Variables ==========
+
+    #[test]
+    fn compile_global_variable() {
+        let chunk = compile("var x = 42;").expect("compile should succeed");
+        assert!(has_opcode(&chunk, OpCode::DefineGlobal));
+        // Should have constant for variable name "x"
+        assert!(chunk
+            .constants
+            .iter()
+            .any(|c| matches!(c, Constant::String(s) if s == "x")));
+    }
+
+    #[test]
+    fn compile_local_variable() {
+        let chunk = compile("{ var x = 1; }").expect("compile should succeed");
+        // Local variables don't use DefineGlobal
+        assert!(!has_opcode(&chunk, OpCode::DefineGlobal));
+        // Should pop the local at end of block
+        assert!(has_opcode(&chunk, OpCode::Pop));
+    }
+
+    #[test]
+    fn compile_get_global() {
+        let chunk = compile("var x = 1; print x;").expect("compile should succeed");
+        assert!(has_opcode(&chunk, OpCode::GetGlobal));
+    }
+
+    #[test]
+    fn compile_set_global() {
+        let chunk = compile("var x = 1; x = 2;").expect("compile should succeed");
+        assert!(has_opcode(&chunk, OpCode::SetGlobal));
+    }
+
+    #[test]
+    fn compile_get_local() {
+        let chunk = compile("{ var x = 1; print x; }").expect("compile should succeed");
+        assert!(has_opcode(&chunk, OpCode::GetLocal));
+    }
+
+    #[test]
+    fn compile_set_local() {
+        let chunk = compile("{ var x = 1; x = 2; }").expect("compile should succeed");
+        assert!(has_opcode(&chunk, OpCode::SetLocal));
+    }
+
+    // ========== Control Flow ==========
+
+    #[test]
+    fn compile_if_statement() {
+        let chunk = compile("if (true) print 1;").expect("compile should succeed");
+        assert!(has_opcode(&chunk, OpCode::JumpIfFalse));
+        assert!(has_opcode(&chunk, OpCode::Jump));
+    }
+
+    #[test]
+    fn compile_if_else_statement() {
+        let chunk = compile("if (true) print 1; else print 2;").expect("compile should succeed");
+        // Should have JumpIfFalse for then branch and Jump for else
+        assert_eq!(count_opcode(&chunk, OpCode::JumpIfFalse), 1);
+        assert_eq!(count_opcode(&chunk, OpCode::Jump), 1);
+    }
+
+    #[test]
+    fn compile_while_loop() {
+        let chunk = compile("while (true) print 1;").expect("compile should succeed");
+        assert!(has_opcode(&chunk, OpCode::JumpIfFalse));
+        assert!(has_opcode(&chunk, OpCode::Loop));
+    }
+
+    #[test]
+    fn compile_logical_and() {
+        let chunk = compile_expr("true and false").expect("compile should succeed");
+        assert!(has_opcode(&chunk, OpCode::JumpIfFalse));
+    }
+
+    #[test]
+    fn compile_logical_or() {
+        let chunk = compile_expr("true or false").expect("compile should succeed");
+        assert!(has_opcode(&chunk, OpCode::JumpIfFalse));
+        assert!(has_opcode(&chunk, OpCode::Jump));
+    }
+
+    // ========== Functions ==========
+
+    #[test]
+    fn compile_function_declaration() {
+        let chunk = compile("fun add(a, b) { return a + b; }").expect("compile should succeed");
+        assert!(has_opcode(&chunk, OpCode::Closure));
+        // Should have function constant
+        assert!(chunk.constants.iter().any(|c| matches!(
+            c,
+            Constant::Function { name, arity, .. }
+            if name == "add" && *arity == 2
+        )));
+    }
+
+    #[test]
+    fn compile_function_call() {
+        let chunk = compile("fun f() {} f();").expect("compile should succeed");
+        assert!(has_opcode(&chunk, OpCode::Call));
+    }
+
+    #[test]
+    fn compile_return_statement() {
+        let chunk = compile("fun f() { return 42; }").expect("compile should succeed");
+        // Return opcode is in the function's chunk
+        assert!(chunk.constants.iter().any(|c| {
+            if let Constant::Function {
+                chunk: func_chunk, ..
+            } = c
+            {
+                has_opcode(func_chunk, OpCode::Return)
+            } else {
+                false
+            }
+        }));
+    }
+
+    #[test]
+    fn compile_implicit_return() {
+        let chunk = compile("fun f() { 42; }").expect("compile should succeed");
+        // Functions always end with Return
+        assert!(chunk.constants.iter().any(|c| {
+            if let Constant::Function {
+                chunk: func_chunk, ..
+            } = c
+            {
+                has_opcode(func_chunk, OpCode::Return)
+            } else {
+                false
+            }
+        }));
+    }
+
+    // ========== Closures ==========
+
+    #[test]
+    fn compile_closure() {
+        let chunk = compile(
+            r#"
+            fun outer() {
+                var x = 1;
+                fun inner() { return x; }
+                return inner;
+            }
+        "#,
+        )
+        .expect("compile should succeed");
+        assert!(has_opcode(&chunk, OpCode::Closure));
+        // Should have function constants with upvalue info (may be nested)
+        assert!(
+            has_function_with_upvalues(&chunk),
+            "Expected at least one function with upvalues"
+        );
+    }
+
+    #[test]
+    fn compile_get_upvalue() {
+        let chunk = compile(
+            r#"
+            fun outer() {
+                var x = 1;
+                fun inner() { print x; }
+            }
+        "#,
+        )
+        .expect("compile should succeed");
+        // The inner function should have upvalues declared
+        assert!(
+            has_function_with_upvalues(&chunk),
+            "Expected inner function to capture 'x' as upvalue"
+        );
+    }
+
+    #[test]
+    fn compile_set_upvalue() {
+        let chunk = compile(
+            r#"
+            fun outer() {
+                var x = 1;
+                fun inner() { x = 2; }
+            }
+        "#,
+        )
+        .expect("compile should succeed");
+        // The inner function should have upvalues
+        assert!(
+            has_function_with_upvalues(&chunk),
+            "Expected inner function to capture 'x' as upvalue"
+        );
+    }
+
+    #[test]
+    fn compile_upvalue_management() {
+        // Test that upvalues are properly managed when variables are captured
+        let chunk = compile(
+            r#"
+            fun outer() {
+                var x = 1;
+                fun inner() { return x; }
+                return inner;
+            }
+        "#,
+        )
+        .expect("compile should succeed");
+        // The key thing is that upvalues are declared
+        assert!(
+            has_function_with_upvalues(&chunk),
+            "Expected inner function to capture 'x' as upvalue"
+        );
+    }
+
+    // ========== Classes ==========
+
+    #[test]
+    fn compile_class_declaration() {
+        let chunk = compile("class Foo {}").expect("compile should succeed");
+        assert!(has_opcode(&chunk, OpCode::Class));
+        assert!(chunk
+            .constants
+            .iter()
+            .any(|c| matches!(c, Constant::String(s) if s == "Foo")));
+    }
+
+    #[test]
+    fn compile_class_with_methods() {
+        let chunk = compile("class Foo { bar() { return 42; } }").expect("compile should succeed");
+        assert!(has_opcode(&chunk, OpCode::Class));
+        assert!(has_opcode(&chunk, OpCode::Method));
+    }
+
+    #[test]
+    fn compile_class_inheritance() {
+        let chunk =
+            compile("class Base {} class Derived < Base {}").expect("compile should succeed");
+        assert!(has_opcode(&chunk, OpCode::Inherit));
+    }
+
+    #[test]
+    fn compile_get_property() {
+        let chunk =
+            compile("class Foo {} var f = Foo(); print f.x;").expect("compile should succeed");
+        assert!(has_opcode(&chunk, OpCode::GetProperty));
+    }
+
+    #[test]
+    fn compile_set_property() {
+        let chunk =
+            compile("class Foo {} var f = Foo(); f.x = 1;").expect("compile should succeed");
+        assert!(has_opcode(&chunk, OpCode::SetProperty));
+    }
+
+    #[test]
+    fn compile_this() {
+        let chunk =
+            compile("class Foo { bar() { return this; } }").expect("compile should succeed");
+        // 'this' is slot 0 in methods, accessed via GetLocal
+        assert!(chunk.constants.iter().any(|c| {
+            if let Constant::Function {
+                chunk: func_chunk, ..
+            } = c
+            {
+                has_opcode(func_chunk, OpCode::GetLocal)
+            } else {
+                false
+            }
+        }));
+    }
+
+    #[test]
+    fn compile_super() {
+        let chunk = compile(
+            r#"
+            class Base { foo() { return 1; } }
+            class Derived < Base {
+                foo() { return super.foo(); }
+            }
+        "#,
+        )
+        .expect("compile should succeed");
+        // GetSuper should be inside the method body
+        let has_super = chunk.constants.iter().any(|c| {
+            if let Constant::Function {
+                chunk: func_chunk, ..
+            } = c
+            {
+                has_opcode(func_chunk, OpCode::GetSuper)
+            } else {
+                false
+            }
+        });
+        assert!(has_super, "Expected GetSuper in method using super");
+    }
+
+    #[test]
+    fn compile_initializer() {
+        let chunk =
+            compile("class Foo { init(x) { this.x = x; } }").expect("compile should succeed");
+        // Initializer should return 'this' implicitly
+        assert!(chunk.constants.iter().any(|c| {
+            if let Constant::Function {
+                name,
+                chunk: func_chunk,
+                ..
+            } = c
+            {
+                name == "init" && has_opcode(func_chunk, OpCode::GetLocal)
+            } else {
+                false
+            }
+        }));
+    }
+
+    // ========== Statements ==========
+
+    #[test]
+    fn compile_print_statement() {
+        let chunk = compile("print 42;").expect("compile should succeed");
+        assert!(has_opcode(&chunk, OpCode::Print));
+    }
+
+    #[test]
+    fn compile_expression_statement() {
+        let chunk = compile("1 + 2;").expect("compile should succeed");
+        // Expression statements should pop the result
+        assert!(has_opcode(&chunk, OpCode::Pop));
+    }
+
+    #[test]
+    fn compile_block() {
+        let chunk = compile("{ var x = 1; var y = 2; }").expect("compile should succeed");
+        // Should pop locals at end of block
+        assert_eq!(count_opcode(&chunk, OpCode::Pop), 2);
+    }
+
+    // ========== Error Cases ==========
+
+    #[test]
+    fn compile_return_from_initializer_errors() {
+        let result = compile("class Foo { init() { return 42; } }");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("initializer"));
+    }
+
+    // ========== Complex Programs ==========
+
+    #[test]
+    fn compile_fibonacci() {
+        let chunk = compile(
+            r#"
+            fun fib(n) {
+                if (n <= 1) return n;
+                return fib(n - 1) + fib(n - 2);
+            }
+            print fib(5);
+        "#,
+        )
+        .expect("compile should succeed");
+        assert!(has_opcode(&chunk, OpCode::Call));
+        assert!(has_opcode(&chunk, OpCode::Print));
+    }
+
+    #[test]
+    fn compile_counter_closure() {
+        let chunk = compile(
+            r#"
+            fun makeCounter() {
+                var i = 0;
+                fun count() {
+                    i = i + 1;
+                    return i;
+                }
+                return count;
+            }
+            var counter = makeCounter();
+            print counter();
+        "#,
+        )
+        .expect("compile should succeed");
+        assert!(has_opcode(&chunk, OpCode::Closure));
+        // Should have upvalues captured (may be nested)
+        assert!(
+            has_function_with_upvalues(&chunk),
+            "Expected count() to capture 'i' as upvalue"
+        );
+    }
+}
