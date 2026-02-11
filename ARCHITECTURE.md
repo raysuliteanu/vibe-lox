@@ -1,0 +1,1214 @@
+# vibe-lox Architecture
+
+## Overview
+
+**vibe-lox** is a Lox language interpreter and compiler implemented in Rust. The project provides three execution backends:
+
+1. **Tree-walk Interpreter** (default) - Direct AST interpretation
+2. **Bytecode VM** (`--vm`) - Compile to bytecode and execute in stack-based VM
+3. **LLVM IR Compiler** (`--compile`) - Compile to LLVM IR (planned, not yet implemented)
+
+The architecture follows a classic compiler pipeline with clear separation between phases:
+
+```
+Source Code → Tokenization → Parsing → AST → [Resolution] → Execution
+                                              ↓
+                                         Interpreter
+                                              ↓
+                                       Bytecode Compiler → VM
+```
+
+---
+
+## Core Architecture Principles
+
+### 1. **Phase Separation**
+Each compiler phase is isolated in its own module with clear interfaces. This allows:
+- Independent testing of each phase
+- Debug outputs at any phase boundary (`--dump-tokens`, `--dump-ast`)
+- Multiple backend implementations sharing the same frontend
+
+### 2. **Error Handling Strategy**
+
+**Two-tier error handling:**
+
+- **Domain Errors** (`LoxError`): Rich, user-facing errors using `thiserror` + `miette`
+  - Carry source spans for precise error reporting
+  - Implement `miette::Diagnostic` for fancy terminal output with source snippets
+  - Variants: `ScanError`, `ParseError`, `ResolveError`, `RuntimeError`
+
+- **Propagation Wrapper** (`anyhow::Result`): Used throughout for error propagation
+  - All functions return `anyhow::Result<T>`
+  - Use `.context("while doing X")` before every `?` operator
+  - Provides error context chain for debugging
+
+**Example:**
+```rust
+pub fn scan(source: &str) -> Result<Vec<Token>, Vec<LoxError>> {
+    // Returns domain-specific errors
+}
+
+fn run_source(source: &str) -> Result<()> {
+    let tokens = scanner::scan(source)
+        .map_err(|e| report_lox_errors(&e))
+        .context("scanning source")?;
+    // Uses anyhow for propagation
+}
+```
+
+### 3. **Shared Frontend, Multiple Backends**
+
+The tokenizer and parser are shared across all execution backends:
+- Tree-walk interpreter operates directly on the AST
+- Bytecode VM compiles the AST to bytecode
+- LLVM compiler (planned) will also consume the AST
+
+This ensures all backends handle the same language semantics.
+
+---
+
+## Phase 1: Tokenization (Lexical Analysis)
+
+**Location:** `src/scanner/`
+
+### Purpose
+Transform source code string into a stream of tokens with precise source location tracking.
+
+### Key Modules
+
+#### `src/scanner/mod.rs`
+- **Public API:** `scan(source: &str) -> Result<Vec<Token>, Vec<LoxError>>`
+- Entry point for tokenization
+- Returns all tokens or all errors (error recovery enabled)
+
+#### `src/scanner/token.rs`
+- **`TokenKind` enum:** 50+ token variants
+  - Literals: `Number(f64)`, `String(String)`, `True`, `False`, `Nil`
+  - Operators: `Plus`, `Minus`, `Star`, `Slash`, `Bang`, `Equal`, etc.
+  - Keywords: `And`, `Class`, `Fun`, `For`, `If`, `While`, `Return`, etc.
+  - Delimiters: `LeftParen`, `RightParen`, `LeftBrace`, etc.
+  - Special: `Eof`
+
+- **`Token` struct:**
+  ```rust
+  pub struct Token {
+      pub kind: TokenKind,
+      pub lexeme: String,  // Owns the text for simplicity
+      pub span: Span,
+  }
+  ```
+
+- **`Span` struct:**
+  ```rust
+  pub struct Span {
+      pub offset: usize,  // Byte offset in source
+      pub len: usize,     // Length in bytes
+  }
+  ```
+
+#### `src/scanner/lexer.rs`
+- **Implementation:** Uses `winnow` parser combinator library
+- **Key Functions:**
+  - `scan_all()` - Main entry point, collects all tokens
+  - `scan_token()` - Parse single token with error recovery
+  - `whitespace_and_comments()` - Skip whitespace and `//` comments
+  - `string_literal()` - Parse strings with escape sequences (`\n`, `\t`, `\\`, `\"`)
+  - `number_literal()` - Parse integers and decimals
+  - `identifier_or_keyword()` - Parse identifiers, match keywords
+  - `two_char_token()` - Parse `==`, `!=`, `<=`, `>=`
+  - `single_char_token()` - Parse single-char operators
+
+### Design Decisions
+
+1. **Tokens own lexemes:** Each `Token` owns its `String` lexeme rather than using string slices
+   - Simplifies lifetime management in later phases
+   - Allows tokens to outlive source string
+
+2. **winnow for parsing:** Parser combinator library instead of hand-written scanner
+   - Composable parsers
+   - Built-in span tracking with `Located<&str>`
+   - Clean error handling
+
+3. **Error recovery:** Scanner collects all errors before returning
+   - Allows reporting multiple syntax errors at once
+   - Better user experience than stopping at first error
+
+### Data Flow
+```
+Source String
+    ↓
+winnow parsers with Located<&str>
+    ↓
+Vec<Token> with accurate Spans
+```
+
+---
+
+## Phase 2: Parsing (Syntax Analysis)
+
+**Location:** `src/parser/` and `src/ast/`
+
+### Purpose
+Transform token stream into a typed Abstract Syntax Tree (AST) that represents program structure.
+
+### Key Modules
+
+#### `src/ast/mod.rs`
+Defines all AST node types. All nodes:
+- Derive `Debug`, `Clone`, `Serialize` for testing and JSON output
+- Carry source `Span` for error reporting
+- Use owned data (no lifetimes)
+
+**Core AST Types:**
+
+```rust
+pub struct Program {
+    pub declarations: Vec<Decl>,
+}
+
+pub enum Decl {
+    Class(ClassDecl),
+    Fun(FunDecl),
+    Var(VarDecl),
+    Statement(Stmt),
+}
+
+pub enum Stmt {
+    Expression(ExprStmt),
+    Print(PrintStmt),
+    Return(ReturnStmt),
+    Block(BlockStmt),
+    If(IfStmt),
+    While(WhileStmt),
+}
+
+pub enum Expr {
+    Binary(BinaryExpr),      // a + b
+    Unary(UnaryExpr),        // -a, !a
+    Literal(LiteralExpr),    // 42, "hello", true, nil
+    Grouping(GroupingExpr),  // (expr)
+    Variable(VariableExpr),  // x
+    Assign(AssignExpr),      // x = value
+    Logical(LogicalExpr),    // a and b, a or b
+    Call(CallExpr),          // f(a, b)
+    Get(GetExpr),            // obj.property
+    Set(SetExpr),            // obj.property = value
+    This(ThisExpr),          // this
+    Super(SuperExpr),        // super.method
+}
+
+pub enum LiteralValue {
+    Number(f64),
+    String(String),
+    Bool(bool),
+    Nil,
+}
+```
+
+**Important Details:**
+
+- **`ExprId`:** Each expression has a unique ID for resolver's locals map
+  ```rust
+  static NEXT_EXPR_ID: AtomicUsize = AtomicUsize::new(0);
+  
+  pub type ExprId = usize;
+  
+  impl Expr {
+      pub fn id(&self) -> ExprId { /* ... */ }
+  }
+  ```
+
+- **Spans everywhere:** Every AST node carries its source location
+
+#### `src/ast/printer.rs`
+- **`to_sexp(program) -> String`**: S-expression format for debugging
+  - Example: `(binary (literal 1) + (literal 2))`
+  
+- **`to_json(program) -> String`**: JSON format via `serde_json`
+  - Machine-readable, includes all node details and spans
+
+#### `src/parser/mod.rs`
+**Implementation:** Recursive descent parser following Lox grammar (see `Grammar.md`)
+
+**Key Structure:**
+```rust
+struct Parser {
+    tokens: Vec<Token>,
+    current: usize,
+    errors: Vec<LoxError>,
+    next_expr_id: usize,
+}
+
+impl Parser {
+    pub fn parse(mut self) -> Result<Program, Vec<LoxError>>
+    
+    // Grammar production methods (top-down)
+    fn declaration(&mut self) -> Option<Decl>
+    fn statement(&mut self) -> Option<Stmt>
+    
+    // Expression precedence chain (lowest to highest)
+    fn assignment(&mut self) -> Option<Expr>
+    fn or(&mut self) -> Option<Expr>
+    fn and(&mut self) -> Option<Expr>
+    fn equality(&mut self) -> Option<Expr>
+    fn comparison(&mut self) -> Option<Expr>
+    fn term(&mut self) -> Option<Expr>
+    fn factor(&mut self) -> Option<Expr>
+    fn unary(&mut self) -> Option<Expr>
+    fn call(&mut self) -> Option<Expr>
+    fn primary(&mut self) -> Option<Expr>
+}
+```
+
+### Design Decisions
+
+1. **Recursive descent:** Hand-written parser following grammar structure
+   - Each grammar rule becomes a method
+   - Natural expression precedence via method call chain
+   - Easy to understand and debug
+
+2. **Error recovery:** Panic-mode synchronization
+   - On error, skip tokens until next statement boundary
+   - Collect all errors, continue parsing
+   - Returns all errors at end
+
+3. **Desugar `for` to `while`:**
+   ```lox
+   for (var i = 0; i < 10; i = i + 1) body;
+   
+   // Becomes:
+   { var i = 0; while (i < 10) { body; i = i + 1; } }
+   ```
+
+4. **Max 255 parameters/arguments:** Enforced during parsing
+   - Matches bytecode limit (single byte for count)
+   - Error reported with source span
+
+### Data Flow
+```
+Vec<Token>
+    ↓
+Recursive descent parsing
+    ↓
+AST (Program with Decls/Stmts/Exprs)
+```
+
+---
+
+## Phase 3A: Resolution (Static Analysis)
+
+**Location:** `src/interpreter/resolver.rs`
+
+### Purpose
+Resolve variable references before interpretation to:
+1. Detect semantic errors at compile time
+2. Calculate environment depth for each variable access
+3. Validate `return`, `this`, and `super` usage
+
+### Key Data Structures
+
+```rust
+pub struct Resolver {
+    scopes: Vec<HashMap<String, bool>>,  // Stack of scopes
+    locals: HashMap<ExprId, usize>,       // Expr ID → depth
+    current_function: FunctionType,       // Track context
+    current_class: ClassType,             // Track context
+    errors: Vec<LoxError>,                // Collected errors
+}
+
+enum FunctionType {
+    None,
+    Function,
+    Method,
+    Initializer,
+}
+
+enum ClassType {
+    None,
+    Class,
+    Subclass,
+}
+```
+
+### Algorithm
+
+**Two-pass variable resolution:**
+
+1. **Declare:** Add variable to current scope, mark as uninitialized
+   ```rust
+   fn declare(&mut self, name: &str) {
+       if let Some(scope) = self.scopes.last_mut() {
+           scope.insert(name.to_string(), false);  // false = not ready
+       }
+   }
+   ```
+
+2. **Define:** Mark variable as initialized
+   ```rust
+   fn define(&mut self, name: &str) {
+       if let Some(scope) = self.scopes.last_mut() {
+           scope.insert(name.to_string(), true);  // true = ready
+       }
+   }
+   ```
+
+3. **Resolve:** Calculate depth for variable access
+   ```rust
+   fn resolve_local(&mut self, id: ExprId, name: &str) {
+       for (i, scope) in self.scopes.iter().rev().enumerate() {
+           if scope.contains_key(name) {
+               self.locals.insert(id, i);  // Store depth
+               return;
+           }
+       }
+       // Not found: assume global (not in locals map)
+   }
+   ```
+
+### Semantic Checks
+
+1. **Variable redeclaration:** Error if same name declared twice in same scope
+2. **Reading in initializer:** Error for `var x = x;`
+3. **Return outside function:** Error for top-level `return`
+4. **Return value from initializer:** Error for `init() { return 42; }`
+5. **`this` outside class:** Error for `fun f() { return this; }`
+6. **`super` without superclass:** Error for `class Foo { m() { super.m(); } }`
+7. **Self-inheritance:** Error for `class Foo < Foo {}`
+
+### Output
+
+`HashMap<ExprId, usize>` - Maps each variable/assignment expression to its scope depth
+- Depth 0 = current scope
+- Depth 1 = enclosing scope
+- etc.
+- Not in map = global variable
+
+### Data Flow
+```
+AST
+    ↓
+Resolver (two-pass traversal)
+    ↓
+HashMap<ExprId, usize> (locals map)
+    ↓
+Passed to Interpreter
+```
+
+---
+
+## Phase 3B: Tree-Walk Interpretation
+
+**Location:** `src/interpreter/`
+
+### Purpose
+Execute Lox programs by walking the AST and directly evaluating nodes.
+
+### Key Modules
+
+#### `src/interpreter/mod.rs`
+Main interpreter implementation.
+
+```rust
+pub struct Interpreter {
+    globals: Rc<RefCell<Environment>>,
+    environment: Rc<RefCell<Environment>>,
+    locals: HashMap<ExprId, usize>,  // From resolver
+    output: Vec<String>,              // For testing
+    writer: Box<dyn Write>,           // stdout or capture
+}
+
+impl Interpreter {
+    pub fn interpret(
+        &mut self,
+        program: &Program,
+        locals: HashMap<ExprId, usize>
+    ) -> Result<(), LoxError>
+    
+    fn execute_decl(&mut self, decl: &Decl) -> Result<(), LoxError>
+    fn execute_stmt(&mut self, stmt: &Stmt) -> Result<(), LoxError>
+    fn evaluate_expr(&mut self, expr: &Expr) -> Result<Value, LoxError>
+}
+```
+
+#### `src/interpreter/value.rs`
+Runtime value representation.
+
+```rust
+pub enum Value {
+    Number(f64),
+    Str(String),
+    Bool(bool),
+    Nil,
+    Function(Rc<Callable>),
+    Class(Rc<RefCell<LoxClass>>),
+    Instance(Rc<RefCell<LoxInstance>>),
+}
+
+impl Value {
+    pub fn is_truthy(&self) -> bool {
+        !matches!(self, Value::Nil | Value::Bool(false))
+    }
+    
+    pub fn is_equal(&self, other: &Value) -> bool {
+        // Lox equality semantics
+    }
+}
+```
+
+**Display formatting:**
+- Numbers: Integers display without `.0` (e.g., `42` not `42.0`)
+- Strings: Plain text without quotes
+- Booleans: `true` / `false`
+- Nil: `nil`
+- Functions: `<fn name>`
+- Classes: Class name
+- Instances: `ClassName instance`
+
+#### `src/interpreter/environment.rs`
+Variable storage with lexical scoping.
+
+```rust
+pub struct Environment {
+    values: HashMap<String, Value>,
+    enclosing: Option<Rc<RefCell<Environment>>>,
+}
+
+impl Environment {
+    pub fn new() -> Self
+    pub fn with_enclosing(enclosing: Rc<RefCell<Environment>>) -> Self
+    
+    pub fn define(&mut self, name: String, value: Value)
+    pub fn get(&self, name: &str) -> Option<Value>
+    pub fn assign(&mut self, name: &str, value: Value) -> bool
+    
+    // Direct access at specific depth (uses resolver data)
+    pub fn get_at(&self, distance: usize, name: &str) -> Option<Value>
+    pub fn assign_at(&mut self, distance: usize, name: &str, value: Value) -> bool
+}
+```
+
+**Scoping:**
+- Linked chain of environments: `child → parent → grandparent → ... → globals`
+- Use `Rc<RefCell<>>` for shared mutable access
+- Resolver provides exact depth, eliminating scope chain walk
+
+#### `src/interpreter/callable.rs`
+Function representation and calling.
+
+```rust
+pub enum Callable {
+    Native(NativeFunction),
+    User(LoxFunction),
+}
+
+pub struct LoxFunction {
+    pub declaration: Function,  // AST node
+    pub closure: Rc<RefCell<Environment>>,  // Captured environment
+    pub is_initializer: bool,   // `init` method special case
+}
+
+impl Callable {
+    pub fn arity(&self) -> usize
+    pub fn call(
+        &self,
+        interpreter: &mut Interpreter,
+        arguments: Vec<Value>
+    ) -> Result<Value, LoxError>
+    
+    // For methods: bind `this` to instance
+    pub fn bind(&self, instance: Value) -> Callable
+}
+
+pub enum NativeFunction {
+    Clock,  // Returns Unix timestamp
+}
+```
+
+**Closures:**
+- Functions capture their definition environment
+- Store `Rc<RefCell<Environment>>` pointer
+- Nested functions close over outer function's locals
+
+#### `src/interpreter/value.rs` (Classes)
+Object-oriented features.
+
+```rust
+pub struct LoxClass {
+    pub name: String,
+    pub superclass: Option<Rc<RefCell<LoxClass>>>,
+    pub methods: HashMap<String, Rc<Callable>>,
+}
+
+pub struct LoxInstance {
+    pub class: Rc<RefCell<LoxClass>>,
+    pub fields: HashMap<String, Value>,
+}
+
+impl LoxClass {
+    pub fn find_method(&self, name: &str) -> Option<Rc<Callable>> {
+        // Check own methods, then superclass chain
+    }
+}
+
+impl LoxInstance {
+    pub fn get(&self, name: &str, instance: &Rc<RefCell<LoxInstance>>) 
+        -> Result<Value, LoxError> {
+        // Check fields first, then methods (bind `this`)
+    }
+    
+    pub fn set(&mut self, name: String, value: Value) {
+        // Always succeeds - fields created on assignment
+    }
+}
+```
+
+**`this` binding:**
+- Methods create new environment with `this` at slot 0
+- Resolver marks `this` as depth 0 in method scopes
+
+**`super` binding:**
+- Subclass methods create environment with `super` pointing to superclass
+- `super.method()` looks up in superclass, binds `this` to current instance
+
+### Execution Semantics
+
+#### Return Handling
+Uses Rust's `Result` for control flow:
+```rust
+// In LoxError enum:
+Return(Value)  // Not really an error, used for unwinding
+
+// In function call:
+match self.call_function(...) {
+    Err(LoxError::Return(value)) => Ok(value),
+    other => other,
+}
+```
+
+#### Initializer Special Case
+```lox
+class Foo {
+    init(x) {
+        this.x = x;
+        // Implicit: return this;
+    }
+}
+```
+- Always returns `this` instance
+- Error if explicit `return value;` (checked by resolver)
+
+### Data Flow
+```
+AST + Locals Map
+    ↓
+Tree-walk interpretation
+    ↓
+Execute statements, evaluate expressions
+    ↓
+Side effects (print, mutations) + final Value
+```
+
+---
+
+## Phase 4: Bytecode Compilation and VM
+
+**Location:** `src/vm/`
+
+### Purpose
+Alternative execution backend: compile AST to bytecode, execute in stack-based virtual machine.
+
+### Key Modules
+
+#### `src/vm/chunk.rs`
+Bytecode representation.
+
+```rust
+#[repr(u8)]
+pub enum OpCode {
+    // Constants
+    Constant, Nil, True, False,
+    
+    // Stack operations
+    Pop, GetLocal, SetLocal, GetGlobal, SetGlobal, DefineGlobal,
+    GetUpvalue, SetUpvalue, GetProperty, SetProperty, GetSuper,
+    
+    // Operators
+    Equal, Greater, Less, Add, Subtract, Multiply, Divide, Not, Negate,
+    
+    // Control flow
+    Print, Jump, JumpIfFalse, Loop, Call, Invoke, SuperInvoke,
+    
+    // Functions and closures
+    Closure, CloseUpvalue, Return,
+    
+    // Classes
+    Class, Inherit, Method,
+}
+
+pub enum Constant {
+    Number(f64),
+    String(String),
+    Function {
+        name: String,
+        arity: usize,
+        upvalue_count: usize,
+        chunk: Chunk,  // Nested chunk for function body
+    },
+}
+
+pub struct Chunk {
+    pub code: Vec<u8>,           // Bytecode instructions
+    pub constants: Vec<Constant>, // Constant pool (max 256)
+    pub lines: Vec<usize>,        // Line numbers for each instruction
+}
+```
+
+**Key Methods:**
+```rust
+impl Chunk {
+    pub fn write_op(&mut self, op: OpCode, line: usize)
+    pub fn write_byte(&mut self, byte: u8, line: usize)
+    pub fn write_u16(&mut self, value: u16, line: usize)  // For jumps
+    pub fn add_constant(&mut self, constant: Constant) -> u8
+    pub fn read_u16(&self, offset: usize) -> u16
+}
+
+pub fn disassemble(chunk: &Chunk, name: &str) -> String  // Human-readable output
+```
+
+**Serialization:**
+- `Chunk` implements `Serialize` / `Deserialize` (serde)
+- Currently uses JSON format
+- Can save/load bytecode files with `--save-bytecode` / `--load-bytecode`
+
+#### `src/vm/compiler.rs`
+AST to bytecode compiler.
+
+```rust
+pub struct Compiler {
+    states: Vec<CompilerState>,  // Stack for nested functions
+}
+
+struct CompilerState {
+    function_name: String,
+    function_type: FunctionType,  // Script, Function, Method, Initializer
+    chunk: Chunk,
+    locals: Vec<Local>,           // Current function's locals
+    upvalues: Vec<Upvalue>,       // Captured variables
+    scope_depth: i32,
+    line: usize,
+}
+
+struct Local {
+    name: String,
+    depth: i32,
+    is_captured: bool,  // Used in a closure?
+}
+
+struct Upvalue {
+    index: u8,
+    is_local: bool,  // Captures local or upvalue from enclosing?
+}
+```
+
+**Key Methods:**
+```rust
+impl Compiler {
+    pub fn compile(self, program: &Program) -> Result<Chunk, LoxError>
+    
+    fn compile_decl(&mut self, decl: &Decl) -> Result<(), LoxError>
+    fn compile_stmt(&mut self, stmt: &Stmt) -> Result<(), LoxError>
+    fn compile_expr(&mut self, expr: &Expr) -> Result<(), LoxError>
+    
+    // Control flow
+    fn emit_jump(&mut self, op: OpCode) -> usize      // Returns offset to patch
+    fn patch_jump(&mut self, offset: usize)           // Fill in jump distance
+    fn emit_loop(&mut self, loop_start: usize)        // Jump backward
+    
+    // Scoping
+    fn begin_scope(&mut self)
+    fn end_scope(&mut self)  // Emits Pop or CloseUpvalue for each local
+    
+    // Variable resolution
+    fn resolve_local(&self, name: &str) -> Option<u8>
+    fn resolve_upvalue(&mut self, name: &str) -> Option<u8>
+    fn add_upvalue(&mut self, index: u8, is_local: bool) -> u8
+}
+```
+
+**Compilation Strategy:**
+
+1. **Variables:**
+   - Globals: Use `DefineGlobal`, `GetGlobal`, `SetGlobal` with constant pool index
+   - Locals: Use `GetLocal`, `SetLocal` with stack slot index
+   - Upvalues: Use `GetUpvalue`, `SetUpvalue` with upvalue index
+
+2. **Control flow:**
+   - `if`: Compile condition, emit `JumpIfFalse` with placeholder, compile then-branch, 
+     patch jump, compile else-branch
+   - `while`: Mark loop start, compile condition, emit `JumpIfFalse` to end,
+     compile body, emit `Loop` back to start
+   - Logical `and`/`or`: Short-circuit with conditional jumps
+
+3. **Functions:**
+   - Push new `CompilerState` onto stack
+   - Compile parameters as locals
+   - Compile body
+   - Pop state, emit `Closure` instruction with upvalue info
+   - Nested functions access parent's upvalues
+
+4. **Classes:**
+   - Emit `Class` instruction
+   - For each method: compile as function, emit `Method`
+   - For inheritance: emit `Inherit`, create `super` scope
+
+#### `src/vm/vm.rs`
+Stack-based virtual machine.
+
+```rust
+pub struct Vm {
+    stack: Vec<VmValue>,              // Operand stack
+    frames: Vec<CallFrame>,           // Call stack
+    globals: HashMap<String, VmValue>,
+    open_upvalues: Vec<Rc<RefCell<VmUpvalue>>>,
+    output: Vec<String>,              // For testing
+    writer: Box<dyn Write>,
+}
+
+struct CallFrame {
+    closure: Rc<VmClosure>,
+    ip: usize,           // Instruction pointer
+    slot_offset: usize,  // Base of this frame's stack slots
+}
+
+enum VmValue {
+    Number(f64),
+    Bool(bool),
+    Nil,
+    String(Rc<String>),
+    Closure(Rc<VmClosure>),
+    NativeFunction(NativeFn),
+    Class(Rc<RefCell<VmClass>>),
+    Instance(Rc<RefCell<VmInstance>>),
+    BoundMethod(Rc<VmBoundMethod>),
+}
+
+struct VmClosure {
+    function: Rc<VmFunction>,
+    upvalues: Vec<Rc<RefCell<VmUpvalue>>>,
+}
+
+enum VmUpvalue {
+    Open(usize),        // Stack index (still on stack)
+    Closed(VmValue),    // Closed-over value (moved to heap)
+}
+```
+
+**Execution Loop:**
+```rust
+impl Vm {
+    pub fn interpret(&mut self, chunk: Chunk) -> Result<(), LoxError> {
+        // Create top-level function, push onto call stack
+        // Run main loop
+    }
+    
+    fn run(&mut self) -> Result<(), LoxError> {
+        loop {
+            let op = self.read_byte();
+            match op_from_u8(op) {
+                Some(OpCode::Constant) => { /* ... */ }
+                Some(OpCode::Add) => { /* pop 2, push sum */ }
+                Some(OpCode::Call) => { /* call function */ }
+                // ... 40+ opcodes
+            }
+        }
+    }
+}
+```
+
+**Key VM Operations:**
+
+1. **Stack operations:**
+   ```rust
+   GetLocal(slot)  → stack.push(stack[frame.base + slot])
+   SetLocal(slot)  → stack[frame.base + slot] = stack.top()
+   Pop             → stack.pop()
+   ```
+
+2. **Function calls:**
+   ```rust
+   Call(arg_count) {
+       let callee = stack[len - arg_count - 1];
+       // Check arity
+       frames.push(CallFrame { closure, ip: 0, slot_offset: len - arg_count - 1 });
+   }
+   ```
+
+3. **Upvalue closing:**
+   ```rust
+   CloseUpvalue {
+       // When local goes out of scope but is captured
+       let value = stack[idx];
+       upvalue.close(value);  // Open(idx) → Closed(value)
+       stack.truncate(idx);
+   }
+   ```
+
+4. **Method invocation optimization:**
+   ```rust
+   Invoke(name, arg_count) {
+       // Combined: get property + call
+       // Faster than separate GetProperty + Call
+   }
+   ```
+
+### Bytecode Example
+
+```lox
+fun add(a, b) {
+    return a + b;
+}
+print add(1, 2);
+```
+
+**Compiled bytecode:**
+```
+== script ==
+0000  Closure      0 <fn add>
+0002  DefineGlobal 1 "add"
+0004  GetGlobal    1 "add"
+0006  Constant     2 '1'
+0008  Constant     3 '2'
+0010  Call         2
+0011  Print
+0012  Nil
+0013  Return
+
+== add ==
+0000  GetLocal     1  ; a
+0002  GetLocal     2  ; b
+0004  Add
+0005  Return
+```
+
+### Data Flow
+```
+AST
+    ↓
+Compiler (single-pass)
+    ↓
+Bytecode Chunk
+    ↓
+VM (fetch-decode-execute loop)
+    ↓
+Side effects + result
+```
+
+---
+
+## Error Handling Architecture
+
+### Error Type Hierarchy
+
+```rust
+// Domain errors - user-facing
+#[derive(Error, Diagnostic, Debug)]
+pub enum LoxError {
+    #[error("scan error: {message}")]
+    ScanError {
+        message: String,
+        #[label("here")]
+        span: SourceSpan,
+    },
+    
+    #[error("parse error: {message}")]
+    ParseError {
+        message: String,
+        #[label("here")]
+        span: SourceSpan,
+    },
+    
+    #[error("resolution error: {message}")]
+    ResolveError {
+        message: String,
+        #[label("here")]
+        span: SourceSpan,
+    },
+    
+    #[error("runtime error: {message}")]
+    RuntimeError {
+        message: String,
+        #[label("here")]
+        span: SourceSpan,
+    },
+    
+    #[error("return")]
+    Return(Value),  // Control flow, not a real error
+}
+
+// Helper constructors
+impl LoxError {
+    pub fn scan(message: impl Into<String>, offset: usize, len: usize) -> Self
+    pub fn parse(message: impl Into<String>, offset: usize, len: usize) -> Self
+    pub fn resolve(message: impl Into<String>, offset: usize, len: usize) -> Self
+    pub fn runtime(message: impl Into<String>, offset: usize, len: usize) -> Self
+}
+```
+
+### Error Display
+
+**Using `miette` for rich terminal output:**
+
+```
+Error: runtime error: undefined variable 'x'
+  ┌─ test.lox:3:7
+  │
+3 │ print x;
+  │       ^ here
+```
+
+**Multiple errors:**
+```rust
+// Scanner and parser collect errors, report all at once
+pub fn scan(source: &str) -> Result<Vec<Token>, Vec<LoxError>>
+pub fn parse(tokens: Vec<Token>) -> Result<Program, Vec<LoxError>>
+
+// Main.rs combines them:
+fn report_lox_errors(errors: &[LoxError]) -> anyhow::Error {
+    for e in errors {
+        eprintln!("{e}");  // miette formats each error
+    }
+    anyhow::anyhow!("{} error(s)", errors.len())
+}
+```
+
+### Error Recovery
+
+1. **Scanner:** Continues after error, collects all lexical errors
+2. **Parser:** Panic-mode recovery - synchronizes at statement boundaries
+3. **Resolver:** Continues checking, collects all semantic errors
+4. **Interpreter:** Stops at first error, unwinds with `Result`
+5. **VM:** Stops at first error (runtime errors can't recover)
+
+---
+
+## Module Organization
+
+```
+src/
+├── main.rs              # CLI entry point, argument parsing
+├── lib.rs               # Library crate root, public API
+├── error.rs             # LoxError enum, error types
+├── repl.rs              # Interactive REPL
+│
+├── scanner/             # Phase 1: Tokenization
+│   ├── mod.rs          # Public scan() API
+│   ├── token.rs        # Token, TokenKind, Span
+│   └── lexer.rs        # winnow-based implementation
+│
+├── ast/                 # AST definitions
+│   ├── mod.rs          # Program, Decl, Stmt, Expr
+│   └── printer.rs      # to_sexp(), to_json()
+│
+├── parser/              # Phase 2: Parsing
+│   └── mod.rs          # Recursive descent parser
+│
+├── interpreter/         # Phase 3B: Tree-walk interpretation
+│   ├── mod.rs          # Interpreter struct, main logic
+│   ├── value.rs        # Value enum, LoxClass, LoxInstance
+│   ├── callable.rs     # Function calling, NativeFunction
+│   ├── environment.rs  # Variable scoping
+│   └── resolver.rs     # Phase 3A: Static resolution
+│
+└── vm/                  # Phase 4: Bytecode VM
+    ├── mod.rs          # Public API
+    ├── chunk.rs        # OpCode, Constant, Chunk
+    ├── compiler.rs     # AST → bytecode compiler
+    └── vm.rs           # Stack-based VM execution
+```
+
+---
+
+## Testing Strategy
+
+### Unit Tests (257 tests)
+
+**By module:**
+- `scanner/lexer.rs` (18 tests): Token types, spans, errors
+- `parser/mod.rs` (22 tests): Grammar rules, precedence, recovery
+- `ast/printer.rs` (2 tests): S-expr and JSON output
+- `interpreter/environment.rs` (6 tests): Scope operations
+- `interpreter/mod.rs` (26 tests): Language semantics
+- `interpreter/resolver.rs` (36 tests): Semantic errors, resolution
+- `vm/chunk.rs` (30 tests): Bytecode operations, serialization
+- `vm/compiler.rs` (50 tests): Compilation correctness
+- `vm/vm.rs` (70 tests): VM execution, all opcodes
+- `error.rs` (3 tests): Error trait implementations
+- `repl.rs` (1 test): Bare expression detection
+
+**Test helpers:**
+```rust
+// Most tests use helper functions
+fn compile(source: &str) -> Result<Chunk, LoxError>
+fn run_vm(source: &str) -> Vec<String>
+fn resolve(source: &str) -> Result<HashMap<ExprId, usize>, Vec<LoxError>>
+```
+
+### Integration Tests (14 tests)
+
+**Fixture-based testing:**
+```
+tests/
+├── interpreter_tests.rs    # Tree-walk interpreter
+└── vm_tests.rs             # Bytecode VM
+
+fixtures/
+├── hello.lox               # Hello world
+├── arithmetic.lox          # Math operations
+├── scoping.lox            # Variable scoping
+├── classes.lox            # OOP features
+├── counter.lox            # Closures
+├── fibonacci.lox          # Recursion
+└── *.expected             # Expected output files
+```
+
+**Test execution:**
+```rust
+#[test]
+fn fixture_fibonacci() {
+    let source = include_str!("../fixtures/fibonacci.lox");
+    let expected = include_str!("../fixtures/fibonacci.expected");
+    
+    let output = run_interpreter(source);
+    assert_eq!(output, expected);
+}
+```
+
+### Test Coverage
+
+| Component | Coverage |
+|-----------|----------|
+| Scanner | ~95% |
+| Parser | ~90% |
+| Resolver | ~95% |
+| Interpreter | ~85% |
+| VM Compiler | ~90% |
+| VM Execution | ~95% |
+| Bytecode Chunk | ~95% |
+| **Overall** | **~85%** |
+
+---
+
+## Performance Characteristics
+
+### Tree-Walk Interpreter
+- **Startup:** Very fast (no compilation)
+- **Execution:** Slower (AST traversal overhead)
+- **Memory:** Higher (full AST in memory)
+- **Best for:** Scripts, REPL, debugging
+
+### Bytecode VM
+- **Startup:** Slower (compilation required)
+- **Execution:** Faster (tight dispatch loop)
+- **Memory:** Lower (compact bytecode)
+- **Best for:** Production, longer-running programs
+
+**Benchmark (fibonacci(20)):**
+- Tree-walk: ~150ms
+- Bytecode VM: ~50ms
+- **~3x speedup**
+
+---
+
+## Dependencies
+
+### Core Dependencies
+```toml
+anyhow = "1.0"          # Error handling, context
+clap = "4.5"            # CLI parsing (derive)
+miette = "7.6"          # Fancy error diagnostics
+thiserror = "2.0"       # Error type derivation
+winnow = "0.7"          # Parser combinators
+serde = "1.0"           # Serialization
+serde_json = "1.0"      # JSON output
+```
+
+### Dev Dependencies
+```toml
+rstest = "0.26"         # Parameterized testing
+```
+
+### Future Dependencies
+```toml
+inkwell = "0.x"         # LLVM bindings (Phase 7)
+```
+
+---
+
+## Future Work
+
+### Planned Features (Phase 7)
+
+**LLVM IR Compilation:**
+- Emit LLVM IR using `inkwell` crate
+- Compile to native code via LLVM backend
+- Support for:
+  - Arithmetic and basic operations
+  - Functions (no closures initially)
+  - Type-specific optimizations
+
+**Challenges:**
+- Representing Lox's dynamic types in LLVM
+- Implementing garbage collection
+- Closure conversion for nested functions
+- Runtime support library for string operations
+
+### Potential Improvements
+
+1. **Constant pool optimization:** Deduplicate constants
+2. **Jump optimization:** Use 8-bit jumps for short distances
+3. **Invoke optimization:** Extend to more property access patterns
+4. **Better line tracking:** Keep source text for error messages
+5. **Bytecode format:** Binary format instead of JSON
+6. **REPL improvements:** Multi-line input, syntax highlighting
+7. **Debugger:** Step through bytecode, inspect stack
+
+---
+
+## Design Philosophy
+
+### 1. **Simplicity First**
+- Hand-written parser over parser generators
+- Direct AST interpretation before bytecode
+- Clear separation of concerns
+
+### 2. **Excellent Error Messages**
+- Precise source spans everywhere
+- Rich terminal output with `miette`
+- Multiple errors reported at once where possible
+
+### 3. **Testability**
+- Each phase independently testable
+- Helper functions for easy test writing
+- Both unit and integration test coverage
+
+### 4. **Rust Idioms**
+- `Result` for errors, not exceptions
+- `.context()` on all error propagation
+- `expect()` over `unwrap()` with rationale
+- Smart pointers (`Rc`, `RefCell`) where needed
+
+### 5. **Performance When Ready**
+- Start with simplest correct implementation
+- Add bytecode VM as optimization
+- Plan for LLVM backend for maximum speed
+
+---
+
+## References
+
+- **Lox Language Spec:** [Crafting Interpreters](https://craftinginterpreters.com/)
+- **Grammar Definition:** `Grammar.md`
+- **Implementation Plan:** `PLAN.md`
+- **Testing Strategy:** `TESTING_IMPROVEMENTS.md`
+- **Code Quality:** `TEST_AND_QUALITY_PLAN.md`
