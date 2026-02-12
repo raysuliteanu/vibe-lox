@@ -1,0 +1,13 @@
+fun inner() {
+  var x = -"not a number";
+}
+
+fun middle() {
+  inner();
+}
+
+fun outer() {
+  middle();
+}
+
+outer();

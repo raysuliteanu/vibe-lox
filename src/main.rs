@@ -78,6 +78,7 @@ fn run_source(source: &str, filename: &str) -> Result<()> {
         .resolve(&program)
         .map_err(|errors| report_compile_errors(errors, filename, source))?;
     let mut interpreter = Interpreter::new();
+    interpreter.set_source(source);
     interpreter
         .interpret(&program, locals)
         .map_err(|e| report_runtime_error(&e, Some(source)))?;
@@ -123,14 +124,20 @@ fn report_runtime_error(
 
     match source {
         Some(src) => {
-            // Interpreter mode: show line number
             eprintln!("{}", error.display_with_line(src));
         }
         None => {
-            // VM mode: no line number
             eprintln!("{}", error);
         }
     }
+
+    if vibe_lox::error::backtrace_enabled() {
+        let bt = vibe_lox::error::format_backtrace(error.backtrace_frames());
+        if !bt.is_empty() {
+            eprint!("{bt}");
+        }
+    }
+
     anyhow::anyhow!("execution failed")
 }
 

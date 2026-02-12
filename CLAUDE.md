@@ -19,6 +19,7 @@ cargo run -- --compile <file>  # Emit LLVM IR
 cargo run -- --dump-tokens <f> # Show tokens and stop
 cargo run -- --dump-ast <f>    # Show AST (S-expressions) and stop
 cargo run                      # Enter REPL (no file argument)
+LOX_BACKTRACE=1 cargo run -- <file.lox>  # Show stack backtrace on runtime errors
 ```
 
 ## Architecture

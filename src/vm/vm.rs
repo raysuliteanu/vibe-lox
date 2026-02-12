@@ -4,7 +4,7 @@ use std::io::Write;
 use std::rc::Rc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::error::RuntimeError;
+use crate::error::{RuntimeError, StackFrame};
 use crate::vm::chunk::{Chunk, Constant, OpCode};
 
 #[derive(Debug, Clone)]
@@ -167,6 +167,46 @@ impl Vm {
         self.run()
     }
 
+    /// Build a RuntimeError with the current line number and a backtrace
+    /// snapshot from the VM's call frame stack.
+    fn runtime_error(&self, message: impl Into<String>) -> RuntimeError {
+        let frames: Vec<StackFrame> = self
+            .frames
+            .iter()
+            .rev()
+            .map(|frame| {
+                let func = &frame.closure.function;
+                // ip points past the instruction that caused the error
+                let ip = if frame.ip > 0 { frame.ip - 1 } else { 0 };
+                let line = if ip < func.chunk.lines.len() {
+                    func.chunk.lines[ip]
+                } else {
+                    0
+                };
+                let name = if func.name == "script" {
+                    "<script>".to_string()
+                } else {
+                    func.name.clone()
+                };
+                StackFrame {
+                    function_name: name,
+                    line,
+                }
+            })
+            .collect();
+
+        // The current frame's line gives us the error location
+        let current_line = frames.first().map(|f| f.line).unwrap_or(0);
+        let msg = message.into();
+        let display_msg = if current_line > 0 {
+            format!("line {current_line}: {msg}")
+        } else {
+            msg
+        };
+
+        RuntimeError::new(display_msg).with_backtrace(frames)
+    }
+
     fn run(&mut self) -> Result<(), RuntimeError> {
         loop {
             let frame_idx = self.frames.len() - 1;
@@ -206,16 +246,15 @@ impl Vm {
                 }
                 Some(OpCode::GetGlobal) => {
                     let name = self.read_string_constant();
-                    let value =
-                        self.globals.get(&name).cloned().ok_or_else(|| {
-                            RuntimeError::new(format!("undefined variable '{name}'"))
-                        })?;
+                    let value = self.globals.get(&name).cloned().ok_or_else(|| {
+                        self.runtime_error(format!("undefined variable '{name}'"))
+                    })?;
                     self.stack.push(value);
                 }
                 Some(OpCode::SetGlobal) => {
                     let name = self.read_string_constant();
                     if !self.globals.contains_key(&name) {
-                        return Err(RuntimeError::new(format!("undefined variable '{name}'")));
+                        return Err(self.runtime_error(format!("undefined variable '{name}'")));
                     }
                     let value = self.stack.last().expect("stack not empty").clone();
                     self.globals.insert(name, value);
@@ -265,13 +304,13 @@ impl Vm {
                                 }));
                                 self.stack.push(bound);
                             } else {
-                                return Err(RuntimeError::new(format!(
-                                    "undefined property '{name}'"
-                                )));
+                                return Err(
+                                    self.runtime_error(format!("undefined property '{name}'"))
+                                );
                             }
                         }
                         _ => {
-                            return Err(RuntimeError::new("only instances have properties"));
+                            return Err(self.runtime_error("only instances have properties"));
                         }
                     }
                 }
@@ -285,7 +324,7 @@ impl Vm {
                             self.stack.push(value);
                         }
                         _ => {
-                            return Err(RuntimeError::new("only instances have fields"));
+                            return Err(self.runtime_error("only instances have fields"));
                         }
                     }
                 }
@@ -299,7 +338,7 @@ impl Vm {
                                 VmValue::BoundMethod(Rc::new(VmBoundMethod { receiver, method }));
                             self.stack.push(bound);
                         } else {
-                            return Err(RuntimeError::new(format!("undefined property '{name}'")));
+                            return Err(self.runtime_error(format!("undefined property '{name}'")));
                         }
                     }
                 }
@@ -325,9 +364,9 @@ impl Vm {
                             self.stack.push(VmValue::String(Rc::new(format!("{x}{y}"))));
                         }
                         _ => {
-                            return Err(RuntimeError::new(
-                                "operands must be two numbers or two strings",
-                            ));
+                            return Err(
+                                self.runtime_error("operands must be two numbers or two strings")
+                            );
                         }
                     }
                 }
@@ -349,7 +388,7 @@ impl Vm {
                     match val {
                         VmValue::Number(n) => self.stack.push(VmValue::Number(-n)),
                         _ => {
-                            return Err(RuntimeError::new("operand must be a number"));
+                            return Err(self.runtime_error("operand must be a number"));
                         }
                     }
                 }
@@ -393,7 +432,7 @@ impl Vm {
                             self.invoke_from_class(&class, &name, arg_count)?;
                         }
                     } else {
-                        return Err(RuntimeError::new("only instances have methods"));
+                        return Err(self.runtime_error("only instances have methods"));
                     }
                 }
                 Some(OpCode::SuperInvoke) => {
@@ -472,7 +511,7 @@ impl Vm {
                         sub.borrow_mut().methods.extend(methods);
                         self.stack.pop(); // pop subclass, leave super as local
                     } else {
-                        return Err(RuntimeError::new("superclass must be a class"));
+                        return Err(self.runtime_error("superclass must be a class"));
                     }
                 }
                 Some(OpCode::Method) => {
@@ -485,7 +524,7 @@ impl Vm {
                     }
                 }
                 None => {
-                    return Err(RuntimeError::new(format!("unknown opcode {op}")));
+                    return Err(self.runtime_error(format!("unknown opcode {op}")));
                 }
             }
         }
@@ -526,7 +565,7 @@ impl Vm {
                 self.stack.push(op(*x, *y));
                 Ok(())
             }
-            _ => Err(RuntimeError::new("operands must be numbers")),
+            _ => Err(self.runtime_error("operands must be numbers")),
         }
     }
 
@@ -534,7 +573,7 @@ impl Vm {
         match callee {
             VmValue::Closure(closure) => {
                 if arg_count != closure.function.arity {
-                    return Err(RuntimeError::new(format!(
+                    return Err(self.runtime_error(format!(
                         "expected {} arguments but got {arg_count}",
                         closure.function.arity
                     )));
@@ -573,7 +612,7 @@ impl Vm {
 
                 if let Some(init) = class.borrow().methods.get("init").cloned() {
                     if arg_count != init.function.arity {
-                        return Err(RuntimeError::new(format!(
+                        return Err(self.runtime_error(format!(
                             "expected {} arguments but got {arg_count}",
                             init.function.arity
                         )));
@@ -584,9 +623,9 @@ impl Vm {
                         slot_offset,
                     });
                 } else if arg_count != 0 {
-                    return Err(RuntimeError::new(format!(
-                        "expected 0 arguments but got {arg_count}"
-                    )));
+                    return Err(
+                        self.runtime_error(format!("expected 0 arguments but got {arg_count}"))
+                    );
                 }
                 Ok(())
             }
@@ -594,7 +633,7 @@ impl Vm {
                 let slot_offset = self.stack.len() - arg_count - 1;
                 self.stack[slot_offset] = bm.receiver.clone();
                 if arg_count != bm.method.function.arity {
-                    return Err(RuntimeError::new(format!(
+                    return Err(self.runtime_error(format!(
                         "expected {} arguments but got {arg_count}",
                         bm.method.function.arity
                     )));
@@ -606,7 +645,7 @@ impl Vm {
                 });
                 Ok(())
             }
-            _ => Err(RuntimeError::new("can only call functions and classes")),
+            _ => Err(self.runtime_error("can only call functions and classes")),
         }
     }
 
@@ -621,7 +660,7 @@ impl Vm {
             .methods
             .get(name)
             .cloned()
-            .ok_or_else(|| RuntimeError::new(format!("undefined property '{name}'")))?;
+            .ok_or_else(|| self.runtime_error(format!("undefined property '{name}'")))?;
         let slot_offset = self.stack.len() - arg_count - 1;
         self.frames.push(CallFrame {
             closure: method,

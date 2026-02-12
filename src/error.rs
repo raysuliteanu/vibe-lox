@@ -89,10 +89,21 @@ impl CompileError {
 
 // ============= Runtime errors (simple, no miette) =============
 
+/// A single frame in the Lox call stack, captured at the point of a runtime error.
+#[derive(Debug, Clone)]
+pub struct StackFrame {
+    pub function_name: String,
+    pub line: usize,
+}
+
 #[derive(Error, Debug)]
 pub enum RuntimeError {
     #[error("Error: {message}")]
-    Error { message: String, span: Option<Span> },
+    Error {
+        message: String,
+        span: Option<Span>,
+        backtrace: Vec<StackFrame>,
+    },
 
     #[error("return")]
     Return {
@@ -106,6 +117,7 @@ impl RuntimeError {
         Self::Error {
             message: message.into(),
             span: None,
+            backtrace: Vec::new(),
         }
     }
 
@@ -114,6 +126,27 @@ impl RuntimeError {
         Self::Error {
             message: message.into(),
             span: Some(span),
+            backtrace: Vec::new(),
+        }
+    }
+
+    /// Attach a call-stack backtrace to this error.
+    pub fn with_backtrace(self, frames: Vec<StackFrame>) -> Self {
+        match self {
+            Self::Error { message, span, .. } => Self::Error {
+                message,
+                span,
+                backtrace: frames,
+            },
+            other => other,
+        }
+    }
+
+    /// Get the backtrace frames (empty if none attached).
+    pub fn backtrace_frames(&self) -> &[StackFrame] {
+        match self {
+            Self::Error { backtrace, .. } => backtrace,
+            Self::Return { .. } => &[],
         }
     }
 
@@ -124,6 +157,7 @@ impl RuntimeError {
             Self::Error {
                 message,
                 span: Some(span),
+                ..
             } => {
                 let line = offset_to_line(source, span.offset);
                 format!("Error: line {}: {}", line, message)
@@ -131,6 +165,7 @@ impl RuntimeError {
             Self::Error {
                 message,
                 span: None,
+                ..
             } => {
                 format!("Error: {}", message)
             }
@@ -161,6 +196,29 @@ impl RuntimeError {
             _ => None,
         }
     }
+}
+
+/// Format the backtrace portion for display. Returns empty string if no frames.
+pub fn format_backtrace(frames: &[StackFrame]) -> String {
+    if frames.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("stack backtrace:\n");
+    for (i, frame) in frames.iter().enumerate() {
+        out.push_str(&format!(
+            "  {}: {}()\t\t[line {}]\n",
+            i, frame.function_name, frame.line
+        ));
+    }
+    out
+}
+
+/// Returns true if the user has opted into backtraces via LOX_BACKTRACE env var.
+pub fn backtrace_enabled() -> bool {
+    matches!(
+        std::env::var("LOX_BACKTRACE").as_deref(),
+        Ok("1") | Ok("full")
+    )
 }
 
 /// Calculate line number from byte offset in source
@@ -267,5 +325,63 @@ mod tests {
     fn offset_to_line_past_end() {
         let source = "short";
         assert_eq!(offset_to_line(source, 100), 1); // Past end, still line 1
+    }
+
+    #[test]
+    fn runtime_error_with_backtrace() {
+        let err = RuntimeError::new("operand must be a number").with_backtrace(vec![
+            StackFrame {
+                function_name: "inner".to_string(),
+                line: 6,
+            },
+            StackFrame {
+                function_name: "outer".to_string(),
+                line: 10,
+            },
+            StackFrame {
+                function_name: "<script>".to_string(),
+                line: 13,
+            },
+        ]);
+        let frames = err.backtrace_frames();
+        assert_eq!(frames.len(), 3);
+        assert_eq!(frames[0].function_name, "inner");
+        assert_eq!(frames[0].line, 6);
+        assert_eq!(frames[2].function_name, "<script>");
+    }
+
+    #[test]
+    fn runtime_error_empty_backtrace() {
+        let err = RuntimeError::new("some error");
+        assert!(err.backtrace_frames().is_empty());
+    }
+
+    #[test]
+    fn format_backtrace_renders_correctly() {
+        let frames = vec![
+            StackFrame {
+                function_name: "inner".to_string(),
+                line: 6,
+            },
+            StackFrame {
+                function_name: "outer".to_string(),
+                line: 10,
+            },
+            StackFrame {
+                function_name: "<script>".to_string(),
+                line: 13,
+            },
+        ];
+        let output = format_backtrace(&frames);
+        assert!(output.starts_with("stack backtrace:\n"));
+        assert!(output.contains("0: inner()"));
+        assert!(output.contains("[line 6]"));
+        assert!(output.contains("1: outer()"));
+        assert!(output.contains("2: <script>()"));
+    }
+
+    #[test]
+    fn format_backtrace_empty_returns_empty_string() {
+        assert_eq!(format_backtrace(&[]), "");
     }
 }

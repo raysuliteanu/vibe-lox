@@ -1,3 +1,4 @@
+use vibe_lox::error::RuntimeError;
 use vibe_lox::vm::chunk;
 use vibe_lox::vm::compile_to_chunk;
 use vibe_lox::vm::vm::Vm;
@@ -80,4 +81,46 @@ fn vm_bytecode_roundtrip_classes() {
     let expected = include_str!("../fixtures/classes.expected");
     let expected_lines: Vec<&str> = expected.lines().collect();
     assert_eq!(run_vm_roundtrip(source), expected_lines);
+}
+
+fn run_vm_err(source: &str) -> RuntimeError {
+    let compiled = compile_to_chunk(source).expect("compile should succeed");
+    let mut vm = Vm::new();
+    vm.interpret(compiled).unwrap_err()
+}
+
+#[test]
+fn vm_backtrace_nested_calls() {
+    let source = include_str!("../fixtures/backtrace_nested.lox");
+    let err = run_vm_err(source);
+    let frames = err.backtrace_frames();
+    assert!(
+        frames.len() >= 3,
+        "expected at least 3 backtrace frames, got {}",
+        frames.len()
+    );
+    // Innermost frame first (reversed from call order)
+    assert_eq!(frames[0].function_name, "inner");
+    assert_eq!(frames[1].function_name, "middle");
+    assert_eq!(frames[2].function_name, "outer");
+}
+
+#[test]
+fn vm_backtrace_includes_line_in_error_message() {
+    let source = "var x = -\"bad\";\n";
+    let err = run_vm_err(source);
+    let msg = err.to_string();
+    assert!(
+        msg.contains("line 1"),
+        "VM error should include line number, got: {msg}"
+    );
+}
+
+#[test]
+fn vm_backtrace_top_level_has_script_frame() {
+    let source = "var x = -\"bad\";\n";
+    let err = run_vm_err(source);
+    let frames = err.backtrace_frames();
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0].function_name, "<script>");
 }
