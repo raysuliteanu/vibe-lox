@@ -199,7 +199,13 @@ impl Parser {
     fn block_declarations(&mut self) -> Result<Vec<Decl>, CompileError> {
         let mut declarations = Vec::new();
         while !self.check(TokenKind::RightBrace) && !self.is_at_end() {
-            declarations.push(self.declaration()?);
+            match self.declaration() {
+                Ok(decl) => declarations.push(decl),
+                Err(e) => {
+                    self.errors.push(e);
+                    self.synchronize();
+                }
+            }
         }
         self.consume(TokenKind::RightBrace, "'}' after block")?;
         Ok(declarations)
@@ -713,10 +719,18 @@ impl Parser {
             Ok(self.advance())
         } else {
             let token = self.peek();
+            // Point the error at the end of the previous token (where the
+            // missing token should have been) rather than at the next token.
+            let (offset, len) = if self.current > 0 {
+                let prev = self.previous_span();
+                (prev.offset + prev.len, 1)
+            } else {
+                (token.span.offset, token.span.len.max(1))
+            };
             Err(CompileError::parse(
                 format!("expected {message}, found '{}'", token.lexeme),
-                token.span.offset,
-                token.span.len.max(1),
+                offset,
+                len,
             ))
         }
     }
