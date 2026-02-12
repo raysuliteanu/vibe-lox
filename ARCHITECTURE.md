@@ -6,7 +6,7 @@
 
 1. **Tree-walk Interpreter** (default) - Direct AST interpretation
 2. **Bytecode VM** (`--vm`) - Compile to bytecode and execute in stack-based VM
-3. **LLVM IR Compiler** (`--compile`) - Compile to LLVM IR (planned, not yet implemented)
+3. **LLVM IR Compiler** (`--compile-llvm`) - Compile to LLVM IR (planned, not yet implemented)
 
 The architecture follows a classic compiler pipeline with clear separation between phases:
 
@@ -729,7 +729,7 @@ pub fn disassemble(chunk: &Chunk, name: &str) -> String  // Human-readable outpu
 - `Chunk` implements `Serialize` / `Deserialize` (serde)
 - Uses binary MessagePack format via `rmp-serde`
 - File format: 4-byte magic header (`b"blox"`) followed by MessagePack payload
-- Save bytecode with `--save-bytecode` (derives output path: `.lox` → `.blox`)
+- Save bytecode with `--compile-bytecode` (derives output path: `.lox` → `.blox`)
 - CLI autodetects `.blox` files by checking the magic header and runs them via VM
 
 #### `src/vm/compiler.rs`

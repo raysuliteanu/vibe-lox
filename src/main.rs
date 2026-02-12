@@ -22,7 +22,7 @@ struct Cli {
 
     /// Compile to LLVM IR
     #[arg(long)]
-    compile: bool,
+    compile_llvm: bool,
 
     /// Dump tokens and exit
     #[arg(long)]
@@ -36,9 +36,9 @@ struct Cli {
     #[arg(long, default_value = "sexp", value_parser = ["sexp", "json"])]
     ast_format: String,
 
-    /// Save compiled bytecode to a .blox file (derived from input path)
+    /// Compile to bytecode and save to a .blox file (derived from input path)
     #[arg(long)]
-    save_bytecode: bool,
+    compile_bytecode: bool,
 
     /// Disassemble bytecode (from source or saved file) and print
     #[arg(long)]
@@ -214,11 +214,11 @@ fn main() -> Result<()> {
     }
 
     // Save bytecode to file (derived from input path: .lox -> .blox)
-    if cli.save_bytecode {
+    if cli.compile_bytecode {
         let input_path = cli
             .file
             .as_ref()
-            .context("--save-bytecode requires an input file")?;
+            .context("--compile-bytecode requires an input file")?;
         let output_path = input_path.with_extension("blox");
         let source = read_source(&cli)?;
         let compiled = compile_source(&source)?;
@@ -227,8 +227,8 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    if cli.compile {
-        bail!("--compile not yet implemented");
+    if cli.compile_llvm {
+        bail!("--compile-llvm not yet implemented");
     }
 
     if cli.vm {

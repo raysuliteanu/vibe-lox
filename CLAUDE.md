@@ -16,10 +16,10 @@ cargo fmt                      # Fix formatting
 cargo run -- <file.lox>        # Interpret a Lox file (tree-walk, default)
 cargo run -- <file.blox>       # Autodetect bytecode and run via VM
 cargo run -- --vm <file.lox>   # Interpret via bytecode VM
-cargo run -- --compile <file>  # Emit LLVM IR
+cargo run -- --compile-llvm <file>    # Emit LLVM IR (not yet implemented)
 cargo run -- --dump-tokens <f> # Show tokens and stop
 cargo run -- --dump-ast <f>    # Show AST (S-expressions) and stop
-cargo run -- --save-bytecode <file.lox>  # Compile and save bytecode to .blox
+cargo run -- --compile-bytecode <file.lox>  # Compile and save bytecode to .blox
 cargo run -- --disassemble <f> # Disassemble (source or .blox) and print
 cargo run                      # Enter REPL (no file argument)
 LOX_BACKTRACE=1 cargo run -- <file.lox>  # Show stack backtrace on runtime errors
