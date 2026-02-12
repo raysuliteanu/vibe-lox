@@ -1,4 +1,6 @@
+use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
+use std::fmt;
 
 /// A bytecode instruction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -43,9 +45,22 @@ pub enum OpCode {
     Method,
 }
 
-impl std::fmt::Display for OpCode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for OpCode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{self:?}")
+    }
+}
+
+impl TryFrom<u8> for OpCode {
+    type Error = u8;
+
+    fn try_from(byte: u8) -> Result<Self, Self::Error> {
+        if byte <= OpCode::Method as u8 {
+            // Safety: OpCode is repr(u8) and we've verified byte is in range
+            Ok(unsafe { std::mem::transmute::<u8, OpCode>(byte) })
+        } else {
+            Err(byte)
+        }
     }
 }
 
@@ -63,8 +78,8 @@ pub enum Constant {
     },
 }
 
-impl std::fmt::Display for Constant {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for Constant {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Number(n) => write!(f, "{n}"),
             Self::String(s) => write!(f, "\"{s}\""),
@@ -128,17 +143,20 @@ impl Chunk {
 }
 
 /// Disassemble a chunk into human-readable text.
-pub fn disassemble(chunk: &Chunk, name: &str) -> String {
+///
+/// Returns an error if the chunk contains an invalid opcode, since subsequent
+/// instruction boundaries cannot be determined reliably.
+pub fn disassemble(chunk: &Chunk, name: &str) -> Result<String> {
     let mut out = String::new();
     out.push_str(&format!("== {name} ==\n"));
     let mut offset = 0;
     while offset < chunk.code.len() {
-        offset = disassemble_instruction(chunk, offset, &mut out);
+        offset = disassemble_instruction(chunk, offset, &mut out)?;
     }
-    out
+    Ok(out)
 }
 
-fn disassemble_instruction(chunk: &Chunk, offset: usize, out: &mut String) -> usize {
+fn disassemble_instruction(chunk: &Chunk, offset: usize, out: &mut String) -> Result<usize> {
     out.push_str(&format!("{offset:04} "));
 
     if offset > 0 && chunk.lines[offset] == chunk.lines[offset - 1] {
@@ -148,99 +166,84 @@ fn disassemble_instruction(chunk: &Chunk, offset: usize, out: &mut String) -> us
     }
 
     let byte = chunk.code[offset];
-    let op: Option<OpCode> = op_from_u8(byte);
+    let op = OpCode::try_from(byte);
+    if op.is_err() {
+        bail!("invalid opcode {byte} at offset {offset}");
+    }
+    let op = op.expect("checked above");
 
     match op {
-        Some(op) => match op {
-            OpCode::Constant
-            | OpCode::DefineGlobal
-            | OpCode::GetGlobal
-            | OpCode::SetGlobal
-            | OpCode::Class
-            | OpCode::GetProperty
-            | OpCode::SetProperty
-            | OpCode::Method
-            | OpCode::GetSuper => {
-                let idx = chunk.code[offset + 1];
-                out.push_str(&format!(
-                    "{op:<16} {idx:4} '{}'\n",
-                    chunk.constants[idx as usize]
-                ));
-                offset + 2
-            }
-            OpCode::GetLocal
-            | OpCode::SetLocal
-            | OpCode::Call
-            | OpCode::GetUpvalue
-            | OpCode::SetUpvalue => {
-                let slot = chunk.code[offset + 1];
-                out.push_str(&format!("{op:<16} {slot:4}\n"));
-                offset + 2
-            }
-            OpCode::Jump | OpCode::JumpIfFalse => {
-                let jump = chunk.read_u16(offset + 1);
-                let target = offset + 3 + jump as usize;
-                out.push_str(&format!("{op:<16} {offset:4} -> {target}\n"));
-                offset + 3
-            }
-            OpCode::Loop => {
-                let jump = chunk.read_u16(offset + 1);
-                let target = offset + 3 - jump as usize;
-                out.push_str(&format!("{op:<16} {offset:4} -> {target}\n"));
-                offset + 3
-            }
-            OpCode::Invoke | OpCode::SuperInvoke => {
-                let name_idx = chunk.code[offset + 1];
-                let arg_count = chunk.code[offset + 2];
-                out.push_str(&format!(
-                    "{op:<16} ({arg_count} args) {name_idx:4} '{}'\n",
-                    chunk.constants[name_idx as usize]
-                ));
-                offset + 3
-            }
-            OpCode::Closure => {
-                let mut off = offset + 1;
-                let idx = chunk.code[off];
-                off += 1;
-                out.push_str(&format!(
-                    "{op:<16} {idx:4} {}\n",
-                    chunk.constants[idx as usize]
-                ));
-                if let Constant::Function { upvalue_count, .. } = &chunk.constants[idx as usize] {
-                    for _ in 0..*upvalue_count {
-                        let is_local = chunk.code[off];
-                        let index = chunk.code[off + 1];
-                        let kind = if is_local == 1 { "local" } else { "upvalue" };
-                        out.push_str(&format!(
-                            "{:04}    |                     {kind} {index}\n",
-                            off
-                        ));
-                        off += 2;
-                    }
-                }
-                off
-            }
-            _ => {
-                out.push_str(&format!("{op}\n"));
-                offset + 1
-            }
-        },
-        None => {
-            // TODO: if we get an invalid opcode, won't future disassembly potentiialy be
-            // incorrect? We should probably error here.
-            out.push_str(&format!("Unknown opcode {byte}\n"));
-            offset + 1
+        OpCode::Constant
+        | OpCode::DefineGlobal
+        | OpCode::GetGlobal
+        | OpCode::SetGlobal
+        | OpCode::Class
+        | OpCode::GetProperty
+        | OpCode::SetProperty
+        | OpCode::Method
+        | OpCode::GetSuper => {
+            let idx = chunk.code[offset + 1];
+            out.push_str(&format!(
+                "{op:<16} {idx:4} '{}'\n",
+                chunk.constants[idx as usize]
+            ));
+            Ok(offset + 2)
         }
-    }
-}
-
-// TODO: this is duplicate code to method of same name in vm.rs
-fn op_from_u8(byte: u8) -> Option<OpCode> {
-    // Safety: OpCode is repr(u8), so this is safe for valid values
-    if byte <= OpCode::Method as u8 {
-        Some(unsafe { std::mem::transmute::<u8, OpCode>(byte) })
-    } else {
-        None
+        OpCode::GetLocal
+        | OpCode::SetLocal
+        | OpCode::Call
+        | OpCode::GetUpvalue
+        | OpCode::SetUpvalue => {
+            let slot = chunk.code[offset + 1];
+            out.push_str(&format!("{op:<16} {slot:4}\n"));
+            Ok(offset + 2)
+        }
+        OpCode::Jump | OpCode::JumpIfFalse => {
+            let jump = chunk.read_u16(offset + 1);
+            let target = offset + 3 + jump as usize;
+            out.push_str(&format!("{op:<16} {offset:4} -> {target}\n"));
+            Ok(offset + 3)
+        }
+        OpCode::Loop => {
+            let jump = chunk.read_u16(offset + 1);
+            let target = offset + 3 - jump as usize;
+            out.push_str(&format!("{op:<16} {offset:4} -> {target}\n"));
+            Ok(offset + 3)
+        }
+        OpCode::Invoke | OpCode::SuperInvoke => {
+            let name_idx = chunk.code[offset + 1];
+            let arg_count = chunk.code[offset + 2];
+            out.push_str(&format!(
+                "{op:<16} ({arg_count} args) {name_idx:4} '{}'\n",
+                chunk.constants[name_idx as usize]
+            ));
+            Ok(offset + 3)
+        }
+        OpCode::Closure => {
+            let mut off = offset + 1;
+            let idx = chunk.code[off];
+            off += 1;
+            out.push_str(&format!(
+                "{op:<16} {idx:4} {}\n",
+                chunk.constants[idx as usize]
+            ));
+            if let Constant::Function { upvalue_count, .. } = &chunk.constants[idx as usize] {
+                for _ in 0..*upvalue_count {
+                    let is_local = chunk.code[off];
+                    let index = chunk.code[off + 1];
+                    let kind = if is_local == 1 { "local" } else { "upvalue" };
+                    out.push_str(&format!(
+                        "{off:04}    |                     {kind} {index}\n"
+                    ));
+                    off += 2;
+                }
+            }
+            Ok(off)
+        }
+        _ => {
+            out.push_str(&format!("{op}\n"));
+            Ok(offset + 1)
+        }
     }
 }
 
@@ -268,7 +271,7 @@ mod tests {
         chunk.write_byte(idx, 1);
         chunk.write_op(OpCode::Return, 1);
 
-        let text = disassemble(&chunk, "test");
+        let text = disassemble(&chunk, "test").expect("valid bytecode");
         assert!(text.contains("Constant"));
         assert!(text.contains("42"));
         assert!(text.contains("Return"));
@@ -414,7 +417,7 @@ mod tests {
     fn disassemble_with_name() {
         let mut chunk = Chunk::new();
         chunk.write_op(OpCode::Return, 1);
-        let text = disassemble(&chunk, "test_chunk");
+        let text = disassemble(&chunk, "test_chunk").expect("valid bytecode");
         assert!(text.contains("== test_chunk =="));
     }
 
@@ -436,7 +439,7 @@ mod tests {
         chunk.write_op(OpCode::Less, 1);
         chunk.write_op(OpCode::Return, 1);
 
-        let text = disassemble(&chunk, "test");
+        let text = disassemble(&chunk, "test").expect("valid bytecode");
         assert!(text.contains("Nil"));
         assert!(text.contains("True"));
         assert!(text.contains("False"));
@@ -451,7 +454,7 @@ mod tests {
         chunk.write_op(OpCode::Constant, 1);
         chunk.write_byte(idx, 1);
 
-        let text = disassemble(&chunk, "test");
+        let text = disassemble(&chunk, "test").expect("valid bytecode");
         assert!(text.contains("Constant"));
         assert!(text.contains("123.45"));
     }
@@ -463,7 +466,7 @@ mod tests {
         chunk.write_op(OpCode::Constant, 1);
         chunk.write_byte(idx, 1);
 
-        let text = disassemble(&chunk, "test");
+        let text = disassemble(&chunk, "test").expect("valid bytecode");
         assert!(text.contains("hello world"));
     }
 
@@ -473,7 +476,7 @@ mod tests {
         chunk.write_op(OpCode::Jump, 1);
         chunk.write_u16(10, 1);
 
-        let text = disassemble(&chunk, "test");
+        let text = disassemble(&chunk, "test").expect("valid bytecode");
         assert!(text.contains("Jump"));
         assert!(text.contains("->"));
     }
@@ -487,7 +490,7 @@ mod tests {
         chunk.write_op(OpCode::Loop, 1);
         chunk.write_u16(2, 1);
 
-        let text = disassemble(&chunk, "test");
+        let text = disassemble(&chunk, "test").expect("valid bytecode");
         assert!(text.contains("Loop"));
     }
 
@@ -499,7 +502,7 @@ mod tests {
         chunk.write_op(OpCode::SetLocal, 1);
         chunk.write_byte(5, 1);
 
-        let text = disassemble(&chunk, "test");
+        let text = disassemble(&chunk, "test").expect("valid bytecode");
         assert!(text.contains("GetLocal"));
         assert!(text.contains("SetLocal"));
     }
@@ -511,7 +514,7 @@ mod tests {
         chunk.write_op(OpCode::True, 2);
         chunk.write_op(OpCode::False, 3);
 
-        let text = disassemble(&chunk, "test");
+        let text = disassemble(&chunk, "test").expect("valid bytecode");
         // First instruction shows line number
         assert!(text.contains("   1"));
         // Subsequent different lines show new numbers
@@ -525,7 +528,7 @@ mod tests {
         chunk.write_op(OpCode::Nil, 1);
         chunk.write_op(OpCode::True, 1);
 
-        let text = disassemble(&chunk, "test");
+        let text = disassemble(&chunk, "test").expect("valid bytecode");
         // Second instruction on same line should show |
         assert!(text.contains("   |"));
     }
@@ -575,17 +578,17 @@ mod tests {
     // ========== OpCode Conversion ==========
 
     #[test]
-    fn op_from_u8_valid() {
-        assert_eq!(op_from_u8(OpCode::Nil as u8), Some(OpCode::Nil));
-        assert_eq!(op_from_u8(OpCode::True as u8), Some(OpCode::True));
-        assert_eq!(op_from_u8(OpCode::Return as u8), Some(OpCode::Return));
-        assert_eq!(op_from_u8(OpCode::Method as u8), Some(OpCode::Method));
+    fn opcode_try_from_valid() {
+        assert_eq!(OpCode::try_from(OpCode::Nil as u8), Ok(OpCode::Nil));
+        assert_eq!(OpCode::try_from(OpCode::True as u8), Ok(OpCode::True));
+        assert_eq!(OpCode::try_from(OpCode::Return as u8), Ok(OpCode::Return));
+        assert_eq!(OpCode::try_from(OpCode::Method as u8), Ok(OpCode::Method));
     }
 
     #[test]
-    fn op_from_u8_invalid() {
-        assert_eq!(op_from_u8(255), None);
-        assert_eq!(op_from_u8(200), None);
+    fn opcode_try_from_invalid() {
+        assert_eq!(OpCode::try_from(255), Err(255));
+        assert_eq!(OpCode::try_from(200), Err(200));
     }
 
     // ========== Default Trait ==========

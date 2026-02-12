@@ -205,6 +205,7 @@ fn main() -> Result<()> {
             print!(
                 "{}",
                 chunk::disassemble(&compiled, &path.display().to_string())
+                    .context("while disassembling bytecode")?
             );
         } else {
             let source = read_source(&cli)?;
@@ -214,7 +215,10 @@ fn main() -> Result<()> {
                 .as_ref()
                 .map(|p| p.display().to_string())
                 .unwrap_or_else(|| "<script>".to_string());
-            print!("{}", chunk::disassemble(&compiled, &name));
+            print!(
+                "{}",
+                chunk::disassemble(&compiled, &name).context("while disassembling bytecode")?
+            );
         }
 
         return Ok(());

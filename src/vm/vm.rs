@@ -220,38 +220,38 @@ impl Vm {
             let op = chunk.code[ip];
             self.frames[frame_idx].ip += 1;
 
-            match op_from_u8(op) {
-                Some(OpCode::Constant) => {
+            match OpCode::try_from(op) {
+                Ok(OpCode::Constant) => {
                     let idx = self.read_byte();
                     let constant = self.current_chunk().constants[idx as usize].clone();
                     self.stack.push(constant_to_value(constant));
                 }
-                Some(OpCode::Nil) => self.stack.push(VmValue::Nil),
-                Some(OpCode::True) => self.stack.push(VmValue::Bool(true)),
-                Some(OpCode::False) => self.stack.push(VmValue::Bool(false)),
-                Some(OpCode::Pop) => {
+                Ok(OpCode::Nil) => self.stack.push(VmValue::Nil),
+                Ok(OpCode::True) => self.stack.push(VmValue::Bool(true)),
+                Ok(OpCode::False) => self.stack.push(VmValue::Bool(false)),
+                Ok(OpCode::Pop) => {
                     self.stack.pop();
                 }
-                Some(OpCode::GetLocal) => {
+                Ok(OpCode::GetLocal) => {
                     let slot = self.read_byte() as usize;
                     let offset = self.frames.last().expect("frame").slot_offset;
                     let value = self.stack[offset + slot].clone();
                     self.stack.push(value);
                 }
-                Some(OpCode::SetLocal) => {
+                Ok(OpCode::SetLocal) => {
                     let slot = self.read_byte() as usize;
                     let offset = self.frames.last().expect("frame").slot_offset;
                     let value = self.stack.last().expect("stack not empty").clone();
                     self.stack[offset + slot] = value;
                 }
-                Some(OpCode::GetGlobal) => {
+                Ok(OpCode::GetGlobal) => {
                     let name = self.read_string_constant();
                     let value = self.globals.get(&name).cloned().ok_or_else(|| {
                         self.runtime_error(format!("undefined variable '{name}'"))
                     })?;
                     self.stack.push(value);
                 }
-                Some(OpCode::SetGlobal) => {
+                Ok(OpCode::SetGlobal) => {
                     let name = self.read_string_constant();
                     if !self.globals.contains_key(&name) {
                         return Err(self.runtime_error(format!("undefined variable '{name}'")));
@@ -259,12 +259,12 @@ impl Vm {
                     let value = self.stack.last().expect("stack not empty").clone();
                     self.globals.insert(name, value);
                 }
-                Some(OpCode::DefineGlobal) => {
+                Ok(OpCode::DefineGlobal) => {
                     let name = self.read_string_constant();
                     let value = self.stack.pop().expect("stack not empty");
                     self.globals.insert(name, value);
                 }
-                Some(OpCode::GetUpvalue) => {
+                Ok(OpCode::GetUpvalue) => {
                     let slot = self.read_byte() as usize;
                     let upvalue =
                         Rc::clone(&self.frames.last().expect("frame").closure.upvalues[slot]);
@@ -274,7 +274,7 @@ impl Vm {
                     };
                     self.stack.push(value);
                 }
-                Some(OpCode::SetUpvalue) => {
+                Ok(OpCode::SetUpvalue) => {
                     let slot = self.read_byte() as usize;
                     let value = self.stack.last().expect("stack not empty").clone();
                     let upvalue =
@@ -288,7 +288,7 @@ impl Vm {
                         }
                     }
                 }
-                Some(OpCode::GetProperty) => {
+                Ok(OpCode::GetProperty) => {
                     let name = self.read_string_constant();
                     let instance = self.stack.pop().expect("stack");
                     match instance {
@@ -314,7 +314,7 @@ impl Vm {
                         }
                     }
                 }
-                Some(OpCode::SetProperty) => {
+                Ok(OpCode::SetProperty) => {
                     let name = self.read_string_constant();
                     let value = self.stack.pop().expect("stack");
                     let instance = self.stack.pop().expect("stack");
@@ -328,7 +328,7 @@ impl Vm {
                         }
                     }
                 }
-                Some(OpCode::GetSuper) => {
+                Ok(OpCode::GetSuper) => {
                     let name = self.read_string_constant();
                     let superclass = self.stack.pop().expect("stack");
                     let receiver = self.stack.pop().expect("stack");
@@ -342,18 +342,18 @@ impl Vm {
                         }
                     }
                 }
-                Some(OpCode::Equal) => {
+                Ok(OpCode::Equal) => {
                     let b = self.stack.pop().expect("stack");
                     let a = self.stack.pop().expect("stack");
                     self.stack.push(VmValue::Bool(values_equal(&a, &b)));
                 }
-                Some(OpCode::Greater) => {
+                Ok(OpCode::Greater) => {
                     self.binary_op(|a, b| VmValue::Bool(a > b))?;
                 }
-                Some(OpCode::Less) => {
+                Ok(OpCode::Less) => {
                     self.binary_op(|a, b| VmValue::Bool(a < b))?;
                 }
-                Some(OpCode::Add) => {
+                Ok(OpCode::Add) => {
                     let b = self.stack.pop().expect("stack");
                     let a = self.stack.pop().expect("stack");
                     match (&a, &b) {
@@ -370,20 +370,20 @@ impl Vm {
                         }
                     }
                 }
-                Some(OpCode::Subtract) => {
+                Ok(OpCode::Subtract) => {
                     self.binary_op(|a, b| VmValue::Number(a - b))?;
                 }
-                Some(OpCode::Multiply) => {
+                Ok(OpCode::Multiply) => {
                     self.binary_op(|a, b| VmValue::Number(a * b))?;
                 }
-                Some(OpCode::Divide) => {
+                Ok(OpCode::Divide) => {
                     self.binary_op(|a, b| VmValue::Number(a / b))?;
                 }
-                Some(OpCode::Not) => {
+                Ok(OpCode::Not) => {
                     let val = self.stack.pop().expect("stack");
                     self.stack.push(VmValue::Bool(val.is_falsey()));
                 }
-                Some(OpCode::Negate) => {
+                Ok(OpCode::Negate) => {
                     let val = self.stack.pop().expect("stack");
                     match val {
                         VmValue::Number(n) => self.stack.push(VmValue::Number(-n)),
@@ -392,33 +392,33 @@ impl Vm {
                         }
                     }
                 }
-                Some(OpCode::Print) => {
+                Ok(OpCode::Print) => {
                     let val = self.stack.pop().expect("stack");
                     let text = format!("{val}");
                     writeln!(self.writer, "{text}").expect("write should succeed");
                     self.output.push(text);
                 }
-                Some(OpCode::Jump) => {
+                Ok(OpCode::Jump) => {
                     let offset = self.read_u16();
                     self.frames.last_mut().expect("frame").ip += offset as usize;
                 }
-                Some(OpCode::JumpIfFalse) => {
+                Ok(OpCode::JumpIfFalse) => {
                     let offset = self.read_u16();
                     if self.stack.last().expect("stack").is_falsey() {
                         self.frames.last_mut().expect("frame").ip += offset as usize;
                     }
                 }
-                Some(OpCode::Loop) => {
+                Ok(OpCode::Loop) => {
                     let offset = self.read_u16();
                     self.frames.last_mut().expect("frame").ip -= offset as usize;
                 }
-                Some(OpCode::Call) => {
+                Ok(OpCode::Call) => {
                     let arg_count = self.read_byte() as usize;
                     let callee_idx = self.stack.len() - 1 - arg_count;
                     let callee = self.stack[callee_idx].clone();
                     self.call_value(callee, arg_count)?;
                 }
-                Some(OpCode::Invoke) => {
+                Ok(OpCode::Invoke) => {
                     let name = self.read_string_constant();
                     let arg_count = self.read_byte() as usize;
                     let receiver_idx = self.stack.len() - 1 - arg_count;
@@ -435,7 +435,7 @@ impl Vm {
                         return Err(self.runtime_error("only instances have methods"));
                     }
                 }
-                Some(OpCode::SuperInvoke) => {
+                Ok(OpCode::SuperInvoke) => {
                     let name = self.read_string_constant();
                     let arg_count = self.read_byte() as usize;
                     let superclass = self.stack.pop().expect("stack");
@@ -443,7 +443,7 @@ impl Vm {
                         self.invoke_from_class(&sc, &name, arg_count)?;
                     }
                 }
-                Some(OpCode::Closure) => {
+                Ok(OpCode::Closure) => {
                     let idx = self.read_byte();
                     let constant = self.current_chunk().constants[idx as usize].clone();
                     if let Constant::Function {
@@ -479,12 +479,12 @@ impl Vm {
                         self.stack.push(VmValue::Closure(closure));
                     }
                 }
-                Some(OpCode::CloseUpvalue) => {
+                Ok(OpCode::CloseUpvalue) => {
                     let idx = self.stack.len() - 1;
                     self.close_upvalues(idx);
                     self.stack.pop();
                 }
-                Some(OpCode::Return) => {
+                Ok(OpCode::Return) => {
                     let result = self.stack.pop().expect("stack");
                     let frame = self.frames.pop().expect("frame");
                     if self.frames.is_empty() {
@@ -495,7 +495,7 @@ impl Vm {
                     self.stack.truncate(frame.slot_offset);
                     self.stack.push(result);
                 }
-                Some(OpCode::Class) => {
+                Ok(OpCode::Class) => {
                     let name = self.read_string_constant();
                     let class = Rc::new(RefCell::new(VmClass {
                         name,
@@ -503,7 +503,7 @@ impl Vm {
                     }));
                     self.stack.push(VmValue::Class(class));
                 }
-                Some(OpCode::Inherit) => {
+                Ok(OpCode::Inherit) => {
                     let superclass = self.stack[self.stack.len() - 2].clone();
                     let subclass = self.stack.last().expect("stack").clone();
                     if let (VmValue::Class(sc), VmValue::Class(sub)) = (&superclass, &subclass) {
@@ -514,7 +514,7 @@ impl Vm {
                         return Err(self.runtime_error("superclass must be a class"));
                     }
                 }
-                Some(OpCode::Method) => {
+                Ok(OpCode::Method) => {
                     let name = self.read_string_constant();
                     let method = self.stack.pop().expect("stack");
                     if let (VmValue::Closure(closure), Some(VmValue::Class(class))) =
@@ -523,7 +523,7 @@ impl Vm {
                         class.borrow_mut().methods.insert(name, closure);
                     }
                 }
-                None => {
+                Err(_) => {
                     return Err(self.runtime_error(format!("unknown opcode {op}")));
                 }
             }
@@ -735,14 +735,6 @@ fn values_equal(a: &VmValue, b: &VmValue) -> bool {
         (VmValue::Number(a), VmValue::Number(b)) => a == b,
         (VmValue::String(a), VmValue::String(b)) => a == b,
         _ => false,
-    }
-}
-
-fn op_from_u8(byte: u8) -> Option<OpCode> {
-    if byte <= OpCode::Method as u8 {
-        Some(unsafe { std::mem::transmute::<u8, OpCode>(byte) })
-    } else {
-        None
     }
 }
 
