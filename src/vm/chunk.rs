@@ -226,12 +226,15 @@ fn disassemble_instruction(chunk: &Chunk, offset: usize, out: &mut String) -> us
             }
         },
         None => {
+            // TODO: if we get an invalid opcode, won't future disassembly potentiialy be
+            // incorrect? We should probably error here.
             out.push_str(&format!("Unknown opcode {byte}\n"));
             offset + 1
         }
     }
 }
 
+// TODO: this is duplicate code to method of same name in vm.rs
 fn op_from_u8(byte: u8) -> Option<OpCode> {
     // Safety: OpCode is repr(u8), so this is safe for valid values
     if byte <= OpCode::Method as u8 {
@@ -274,6 +277,7 @@ mod tests {
     #[test]
     fn serialize_deserialize_chunk() {
         let mut chunk = Chunk::new();
+        #[allow(clippy::approx_constant)]
         chunk.add_constant(Constant::Number(3.14));
         chunk.write_op(OpCode::Constant, 1);
         chunk.write_byte(0, 1);

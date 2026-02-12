@@ -623,7 +623,7 @@ mod tests {
     }
 
     fn has_opcode(chunk: &Chunk, op: OpCode) -> bool {
-        chunk.code.iter().any(|&byte| byte == op as u8)
+        chunk.code.contains(&(op as u8))
     }
 
     fn count_opcode(chunk: &Chunk, op: OpCode) -> usize {
@@ -633,21 +633,19 @@ mod tests {
     /// Check if any function constant (recursively) has the specified upvalue count
     fn has_function_with_upvalues(chunk: &Chunk) -> bool {
         for constant in &chunk.constants {
-            match constant {
-                Constant::Function {
-                    upvalue_count,
-                    chunk: nested_chunk,
-                    ..
-                } => {
-                    if *upvalue_count > 0 {
-                        return true;
-                    }
-                    // Check nested functions
-                    if has_function_with_upvalues(nested_chunk) {
-                        return true;
-                    }
+            if let Constant::Function {
+                upvalue_count,
+                chunk: nested_chunk,
+                ..
+            } = constant
+            {
+                if *upvalue_count > 0 {
+                    return true;
                 }
-                _ => {}
+                // Check nested functions
+                if has_function_with_upvalues(nested_chunk) {
+                    return true;
+                }
             }
         }
         false
