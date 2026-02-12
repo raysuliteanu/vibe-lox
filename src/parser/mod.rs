@@ -901,10 +901,102 @@ mod tests {
         assert!(sexp.contains("< Bar"));
     }
 
+    fn error_message(error: &CompileError) -> &str {
+        match error {
+            CompileError::Parse { message, .. } => message,
+            CompileError::Scan { message, .. } => message,
+            CompileError::Resolve { message, .. } => message,
+        }
+    }
+
+    fn error_offset(error: &CompileError) -> usize {
+        match error {
+            CompileError::Parse { span, .. }
+            | CompileError::Scan { span, .. }
+            | CompileError::Resolve { span, .. } => span.offset().into(),
+        }
+    }
+
     #[test]
     fn error_recovery() {
         let errors = parse_err("var x = ; var y = 1;");
         assert!(!errors.is_empty());
+    }
+
+    #[test]
+    fn missing_semicolon_points_to_previous_token() {
+        // "x = 1\nprint x;" — the missing ';' error should point at offset 5
+        // (end of '1') not at offset 7 (start of 'print')
+        let source = "x = 1\nprint x;";
+        let errors = parse_err(source);
+        assert_eq!(errors.len(), 1, "should report exactly one error");
+        assert!(
+            error_message(&errors[0]).contains("';'"),
+            "error should mention missing semicolon"
+        );
+        let offset = error_offset(&errors[0]);
+        assert_eq!(
+            offset, 5,
+            "error should point at end of '1' (offset 5), not at 'print'"
+        );
+    }
+
+    #[test]
+    fn block_error_recovery_no_cascade() {
+        // A missing ';' inside a block should produce one error, not cascade
+        // through closing braces
+        let source = "fun foo() { var x = 1\n print x; }";
+        let errors = parse_err(source);
+        assert_eq!(
+            errors.len(),
+            1,
+            "should report exactly one error, not cascade"
+        );
+        assert!(
+            error_message(&errors[0]).contains("';'"),
+            "error should mention missing semicolon"
+        );
+    }
+
+    #[test]
+    fn nested_block_error_recovery_no_cascade() {
+        // Error inside a deeply nested function should not cascade
+        let source = "fun outer() { fun inner() { var x = 1\n print x; } }";
+        let errors = parse_err(source);
+        assert_eq!(
+            errors.len(),
+            1,
+            "should report exactly one error from nested block"
+        );
+    }
+
+    #[test]
+    fn class_method_error_recovery_no_cascade() {
+        // A syntax error inside a class method should not cascade through
+        // the class body closing brace
+        let source = "class Foo { bar() { var x = 1\n print x; } }";
+        let errors = parse_err(source);
+        assert_eq!(
+            errors.len(),
+            1,
+            "should report exactly one error, not cascade past class body"
+        );
+        assert!(
+            error_message(&errors[0]).contains("';'"),
+            "error should mention missing semicolon"
+        );
+    }
+
+    #[test]
+    fn class_multiple_methods_error_recovery() {
+        // An error in the first method should not prevent parsing the second
+        let source = "class Foo { bad() { x = 1\n return x; } good() { return 2; } }";
+        let errors = parse_err(source);
+        assert_eq!(
+            errors.len(),
+            1,
+            "only the first method has an error; second should parse fine"
+        );
     }
 
     #[test]

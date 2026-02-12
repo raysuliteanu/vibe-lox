@@ -1,0 +1,10 @@
+class Foo {
+  broken() {
+    var x = 1
+    print x;
+  }
+
+  working() {
+    return 42;
+  }
+}
