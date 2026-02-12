@@ -14,10 +14,13 @@ cargo clippy -- -D warnings    # Lint (must be clean before commits)
 cargo fmt --check              # Check formatting
 cargo fmt                      # Fix formatting
 cargo run -- <file.lox>        # Interpret a Lox file (tree-walk, default)
+cargo run -- <file.blox>       # Autodetect bytecode and run via VM
 cargo run -- --vm <file.lox>   # Interpret via bytecode VM
 cargo run -- --compile <file>  # Emit LLVM IR
 cargo run -- --dump-tokens <f> # Show tokens and stop
 cargo run -- --dump-ast <f>    # Show AST (S-expressions) and stop
+cargo run -- --save-bytecode <file.lox>  # Compile and save bytecode to .blox
+cargo run -- --disassemble <f> # Disassemble (source or .blox) and print
 cargo run                      # Enter REPL (no file argument)
 LOX_BACKTRACE=1 cargo run -- <file.lox>  # Show stack backtrace on runtime errors
 ```
@@ -42,6 +45,7 @@ Pipeline: Source -> Scanner (winnow) -> Tokens -> Parser -> AST -> Interpreter/V
 - `anyhow` for `Result` type and `.context()` error propagation
 - `clap` (derive) for CLI argument parsing
 - `serde` / `serde_json` for JSON AST output
+- `rmp-serde` for binary bytecode serialization (MessagePack)
 - `inkwell` for LLVM IR generation (Phase 7)
 
 ## Conventions

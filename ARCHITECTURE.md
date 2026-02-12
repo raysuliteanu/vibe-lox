@@ -727,9 +727,10 @@ pub fn disassemble(chunk: &Chunk, name: &str) -> String  // Human-readable outpu
 **Serialization:**
 
 - `Chunk` implements `Serialize` / `Deserialize` (serde)
-- Currently uses JSON format
-- Can save/load bytecode files with `--save-bytecode` / `--load-bytecode`
-- `--save-bytecode` derives output path from input file (`.lox` → `.blox`)
+- Uses binary MessagePack format via `rmp-serde`
+- File format: 4-byte magic header (`b"blox"`) followed by MessagePack payload
+- Save bytecode with `--save-bytecode` (derives output path: `.lox` → `.blox`)
+- CLI autodetects `.blox` files by checking the magic header and runs them via VM
 
 #### `src/vm/compiler.rs`
 
@@ -1371,7 +1372,8 @@ miette = "7.6"          # Fancy error diagnostics
 thiserror = "2.0"       # Error type derivation
 winnow = "0.7"          # Parser combinators
 serde = "1.0"           # Serialization
-serde_json = "1.0"      # JSON output
+serde_json = "1.0"      # JSON AST output
+rmp-serde = "1.3"       # MessagePack bytecode serialization
 ```
 
 ### Dev Dependencies
@@ -1414,7 +1416,7 @@ inkwell = "0.x"         # LLVM bindings (Phase 7)
 2. **Jump optimization:** Use 8-bit jumps for short distances
 3. **Invoke optimization:** Extend to more property access patterns
 4. **Better line tracking:** Keep source text for error messages
-5. **Bytecode format:** Binary format instead of JSON
+5. ~~**Bytecode format:** Binary format instead of JSON~~ (done — uses MessagePack with magic header)
 6. **REPL improvements:** Multi-line input, syntax highlighting
 7. **Debugger:** Step through bytecode, inspect stack
 

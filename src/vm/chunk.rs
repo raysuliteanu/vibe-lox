@@ -279,8 +279,8 @@ mod tests {
         chunk.write_byte(0, 1);
         chunk.write_op(OpCode::Return, 1);
 
-        let serialized = serde_json::to_string(&chunk).expect("serialize");
-        let deserialized: Chunk = serde_json::from_str(&serialized).expect("deserialize");
+        let serialized = rmp_serde::to_vec(&chunk).expect("serialize");
+        let deserialized: Chunk = rmp_serde::from_slice(&serialized).expect("deserialize");
         assert_eq!(chunk, deserialized);
     }
 
@@ -531,8 +531,8 @@ mod tests {
     #[test]
     fn serialize_empty_chunk() {
         let chunk = Chunk::new();
-        let serialized = serde_json::to_string(&chunk).expect("serialize");
-        let deserialized: Chunk = serde_json::from_str(&serialized).expect("deserialize");
+        let serialized = rmp_serde::to_vec(&chunk).expect("serialize");
+        let deserialized: Chunk = rmp_serde::from_slice(&serialized).expect("deserialize");
         assert_eq!(chunk, deserialized);
     }
 
@@ -544,8 +544,8 @@ mod tests {
         }
         chunk.write_op(OpCode::Return, 1);
 
-        let serialized = serde_json::to_string(&chunk).expect("serialize");
-        let deserialized: Chunk = serde_json::from_str(&serialized).expect("deserialize");
+        let serialized = rmp_serde::to_vec(&chunk).expect("serialize");
+        let deserialized: Chunk = rmp_serde::from_slice(&serialized).expect("deserialize");
         assert_eq!(chunk, deserialized);
     }
 
@@ -563,8 +563,8 @@ mod tests {
         });
         chunk.write_op(OpCode::Return, 1);
 
-        let serialized = serde_json::to_string(&chunk).expect("serialize");
-        let deserialized: Chunk = serde_json::from_str(&serialized).expect("deserialize");
+        let serialized = rmp_serde::to_vec(&chunk).expect("serialize");
+        let deserialized: Chunk = rmp_serde::from_slice(&serialized).expect("deserialize");
         assert_eq!(chunk, deserialized);
     }
 
