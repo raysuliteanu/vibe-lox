@@ -36,9 +36,9 @@ struct Cli {
     #[arg(long, default_value = "sexp", value_parser = ["sexp", "json"])]
     ast_format: String,
 
-    /// Save compiled bytecode to a file
-    #[arg(long, value_name = "FILE")]
-    save_bytecode: Option<PathBuf>,
+    /// Save compiled bytecode to a .blox file (derived from input path)
+    #[arg(long)]
+    save_bytecode: bool,
 
     /// Load and execute bytecode from a file
     #[arg(long, value_name = "FILE")]
@@ -196,12 +196,17 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    // Save bytecode to file (optionally also run)
-    if let Some(ref path) = cli.save_bytecode {
+    // Save bytecode to file (derived from input path: .lox -> .blox)
+    if cli.save_bytecode {
+        let input_path = cli
+            .file
+            .as_ref()
+            .context("--save-bytecode requires an input file")?;
+        let output_path = input_path.with_extension("blox");
         let source = read_source(&cli)?;
         let compiled = compile_source(&source)?;
-        save_chunk(&compiled, path)?;
-        eprintln!("bytecode saved to '{}'", path.display());
+        save_chunk(&compiled, &output_path)?;
+        eprintln!("bytecode saved to '{}'", output_path.display());
         return Ok(());
     }
 
