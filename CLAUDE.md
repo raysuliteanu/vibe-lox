@@ -15,7 +15,6 @@ cargo fmt --check              # Check formatting
 cargo fmt                      # Fix formatting
 cargo run -- <file.lox>        # Interpret a Lox file (tree-walk, default)
 cargo run -- <file.blox>       # Autodetect bytecode and run via VM
-cargo run -- --vm <file.lox>   # Interpret via bytecode VM
 cargo run -- --compile-llvm <file>    # Emit LLVM IR (not yet implemented)
 cargo run -- --dump-tokens <f> # Show tokens and stop
 cargo run -- --dump-ast <f>    # Show AST (S-expressions) and stop

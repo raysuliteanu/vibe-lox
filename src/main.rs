@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 
 use vibe_lox::ast::printer;
 use vibe_lox::interpreter::Interpreter;
@@ -15,14 +15,6 @@ use vibe_lox::vm::chunk;
 struct Cli {
     /// Lox source file to run (omit for REPL)
     file: Option<PathBuf>,
-
-    /// Use bytecode VM backend
-    #[arg(long)]
-    vm: bool,
-
-    /// Compile to LLVM IR
-    #[arg(long)]
-    compile_llvm: bool,
 
     /// Dump tokens and exit
     #[arg(long)]
@@ -39,6 +31,10 @@ struct Cli {
     /// Compile to bytecode and save to a .blox file (derived from input path)
     #[arg(long)]
     compile_bytecode: bool,
+
+    /// Compile to LLVM IR
+    #[arg(long)]
+    compile_llvm: bool,
 
     /// Disassemble bytecode (from source or saved file) and print
     #[arg(long)]
@@ -79,10 +75,6 @@ fn run_source(source: &str, filename: &str) -> Result<()> {
         .interpret(&program, locals)
         .map_err(|e| report_runtime_error(&e, Some(source)))?;
     Ok(())
-}
-
-fn run_vm(source: &str) -> Result<()> {
-    vibe_lox::vm::interpret_vm(source).map_err(|e| report_runtime_error(&e, None))
 }
 
 /// Magic number at the start of every `.blox` file: ASCII "blox"
@@ -164,6 +156,16 @@ fn report_runtime_error(
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
+    // Validate that the provided file exists before doing anything else
+    if let Some(ref path) = cli.file
+        && !path.exists()
+    {
+        let mut cmd = Cli::command();
+        let _ = cmd.print_help();
+        eprintln!("\n");
+        bail!("file not found: '{}'", path.display());
+    }
+
     if cli.dump_tokens {
         let source = read_source(&cli)?;
         let filename = get_filename(&cli);
@@ -183,15 +185,19 @@ fn main() -> Result<()> {
         let program = LoxParser::new(tokens)
             .parse()
             .map_err(|e| report_compile_errors(e, &filename, &source))?;
-        match cli.ast_format.as_str() {
-            "json" => print!("{}", printer::to_json(&program)),
-            _ => print!("{}", printer::to_sexp(&program)),
+        if cli.ast_format.as_str() == "json" {
+            print!("{}", printer::to_json(&program))
+        } else {
+            print!("{}", printer::to_sexp(&program));
         }
         return Ok(());
     }
 
-    // Disassemble: autodetect whether input is bytecode or source
+    // TODO: disassemble doesn't really make sense for source files, only for compiled code
+    // what's the use case for disassembly of source code ... looking at what would be generated
+    // for a source file?
     if cli.disassemble {
+        // autodetect whether input is bytecode or source
         if let Some(ref path) = cli.file
             && is_bytecode_file(path)?
         {
@@ -199,17 +205,22 @@ fn main() -> Result<()> {
             print!(
                 "{}",
                 chunk::disassemble(&compiled, &path.display().to_string())
+                    .context("while disassembling bytecode")?
             );
-            return Ok(());
+        } else {
+            let source = read_source(&cli)?;
+            let compiled = compile_source(&source)?;
+            let name = cli
+                .file
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "<script>".to_string());
+            print!(
+                "{}",
+                chunk::disassemble(&compiled, &name).context("while disassembling bytecode")?
+            );
         }
-        let source = read_source(&cli)?;
-        let compiled = compile_source(&source)?;
-        let name = cli
-            .file
-            .as_ref()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|| "<script>".to_string());
-        print!("{}", chunk::disassemble(&compiled, &name));
+
         return Ok(());
     }
 
@@ -223,18 +234,11 @@ fn main() -> Result<()> {
         let source = read_source(&cli)?;
         let compiled = compile_source(&source)?;
         save_chunk(&compiled, &output_path)?;
-        eprintln!("bytecode saved to '{}'", output_path.display());
         return Ok(());
     }
 
     if cli.compile_llvm {
         bail!("--compile-llvm not yet implemented");
-    }
-
-    if cli.vm {
-        let source = read_source(&cli)?;
-        run_vm(&source)?;
-        return Ok(());
     }
 
     match cli.file {
@@ -245,11 +249,11 @@ fn main() -> Result<()> {
                 let mut vm = vibe_lox::vm::vm::Vm::new();
                 vm.interpret(compiled)
                     .map_err(|e| report_runtime_error(&e, None))?;
-                return Ok(());
+            } else {
+                let source = read_source(&cli)?;
+                let filename = get_filename(&cli);
+                run_source(&source, &filename)?;
             }
-            let source = read_source(&cli)?;
-            let filename = get_filename(&cli);
-            run_source(&source, &filename)?;
             Ok(())
         }
         None => {

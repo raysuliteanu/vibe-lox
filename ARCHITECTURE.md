@@ -2,11 +2,17 @@
 
 ## Overview
 
-**vibe-lox** is a Lox language interpreter and compiler implemented in Rust. The project provides three execution backends:
+**vibe-lox** is a Lox language interpreter and compiler implemented in Rust.
+It can directly interpret Lox source code, or compile and execute bytecode. An
+LLVM IR compilation mode is on the "roadmap".
 
-1. **Tree-walk Interpreter** (default) - Direct AST interpretation
-2. **Bytecode VM** (`--vm`) - Compile to bytecode and execute in stack-based VM
-3. **LLVM IR Compiler** (`--compile-llvm`) - Compile to LLVM IR (planned, not yet implemented)
+1. **Tree-walk Interpreter** - Direct AST interpretation of Lox source code (no
+   compilation)
+1. **Stack-based VM** - execute bytecode Lox program, compiled with
+   --compile-bytecode
+1. **Bytecode Compiler** (`--compile-bytecode`) - Compile to custom Lox bytecode
+   for use with the VM
+1. **LLVM IR Compiler** (`--compile-llvm`) - Compile to LLVM IR (planned, not yet implemented)
 
 The architecture follows a classic compiler pipeline with clear separation between phases:
 
