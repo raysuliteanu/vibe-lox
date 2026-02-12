@@ -70,7 +70,13 @@ impl Parser {
 
         let mut methods = Vec::new();
         while !self.check(TokenKind::RightBrace) && !self.is_at_end() {
-            methods.push(self.function("method")?);
+            match self.function("method") {
+                Ok(method) => methods.push(method),
+                Err(e) => {
+                    self.errors.push(e);
+                    self.synchronize();
+                }
+            }
         }
 
         self.consume(TokenKind::RightBrace, "'}' after class body")?;
