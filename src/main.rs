@@ -22,7 +22,7 @@ struct Cli {
 
     /// Compile to LLVM IR
     #[arg(long)]
-    compile: bool,
+    compile_llvm: bool,
 
     /// Dump tokens and exit
     #[arg(long)]
@@ -36,13 +36,9 @@ struct Cli {
     #[arg(long, default_value = "sexp", value_parser = ["sexp", "json"])]
     ast_format: String,
 
-    /// Save compiled bytecode to a file
-    #[arg(long, value_name = "FILE")]
-    save_bytecode: Option<PathBuf>,
-
-    /// Load and execute bytecode from a file
-    #[arg(long, value_name = "FILE")]
-    load_bytecode: Option<PathBuf>,
+    /// Compile to bytecode and save to a .blox file (derived from input path)
+    #[arg(long)]
+    compile_bytecode: bool,
 
     /// Disassemble bytecode (from source or saved file) and print
     #[arg(long)]
@@ -89,15 +85,39 @@ fn run_vm(source: &str) -> Result<()> {
     vibe_lox::vm::interpret_vm(source).map_err(|e| report_runtime_error(&e, None))
 }
 
+/// Magic number at the start of every `.blox` file: ASCII "blox"
+const BLOX_MAGIC: &[u8; 4] = b"blox";
+
 fn save_chunk(compiled: &chunk::Chunk, path: &PathBuf) -> Result<()> {
-    let bytes = serde_json::to_vec_pretty(compiled).context("serialize bytecode to JSON")?;
+    let payload = rmp_serde::to_vec(compiled).context("serialize bytecode to MessagePack")?;
+    let mut bytes = Vec::with_capacity(BLOX_MAGIC.len() + payload.len());
+    bytes.extend_from_slice(BLOX_MAGIC);
+    bytes.extend_from_slice(&payload);
     std::fs::write(path, bytes).with_context(|| format!("write bytecode to '{}'", path.display()))
 }
 
 fn load_chunk(path: &PathBuf) -> Result<chunk::Chunk> {
     let bytes =
         std::fs::read(path).with_context(|| format!("read bytecode from '{}'", path.display()))?;
-    serde_json::from_slice(&bytes).context("deserialize bytecode from JSON")
+    if bytes.len() < BLOX_MAGIC.len() || &bytes[..BLOX_MAGIC.len()] != BLOX_MAGIC {
+        bail!(
+            "'{}' is not a valid .blox file (missing magic header)",
+            path.display()
+        );
+    }
+    rmp_serde::from_slice(&bytes[BLOX_MAGIC.len()..])
+        .context("deserialize bytecode from MessagePack")
+}
+
+fn is_bytecode_file(path: &PathBuf) -> Result<bool> {
+    let file =
+        std::fs::File::open(path).with_context(|| format!("open file '{}'", path.display()))?;
+    let mut header = [0u8; 4];
+    use std::io::Read;
+    match file.take(4).read(&mut header) {
+        Ok(4) => Ok(&header == BLOX_MAGIC),
+        _ => Ok(false),
+    }
 }
 
 fn report_compile_errors(
@@ -170,21 +190,18 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    // Load bytecode from file and execute or disassemble
-    if let Some(ref path) = cli.load_bytecode {
-        let compiled = load_chunk(path)?;
-        if cli.disassemble {
-            print!("{}", chunk::disassemble(&compiled, "loaded"));
+    // Disassemble: autodetect whether input is bytecode or source
+    if cli.disassemble {
+        if let Some(ref path) = cli.file
+            && is_bytecode_file(path)?
+        {
+            let compiled = load_chunk(path)?;
+            print!(
+                "{}",
+                chunk::disassemble(&compiled, &path.display().to_string())
+            );
             return Ok(());
         }
-        let mut vm = vibe_lox::vm::vm::Vm::new();
-        vm.interpret(compiled)
-            .map_err(|e| report_runtime_error(&e, None))?;
-        return Ok(());
-    }
-
-    // Disassemble source to bytecode listing
-    if cli.disassemble {
         let source = read_source(&cli)?;
         let compiled = compile_source(&source)?;
         let name = cli
@@ -196,17 +213,22 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    // Save bytecode to file (optionally also run)
-    if let Some(ref path) = cli.save_bytecode {
+    // Save bytecode to file (derived from input path: .lox -> .blox)
+    if cli.compile_bytecode {
+        let input_path = cli
+            .file
+            .as_ref()
+            .context("--compile-bytecode requires an input file")?;
+        let output_path = input_path.with_extension("blox");
         let source = read_source(&cli)?;
         let compiled = compile_source(&source)?;
-        save_chunk(&compiled, path)?;
-        eprintln!("bytecode saved to '{}'", path.display());
+        save_chunk(&compiled, &output_path)?;
+        eprintln!("bytecode saved to '{}'", output_path.display());
         return Ok(());
     }
 
-    if cli.compile {
-        bail!("--compile not yet implemented");
+    if cli.compile_llvm {
+        bail!("--compile-llvm not yet implemented");
     }
 
     if cli.vm {
@@ -216,7 +238,15 @@ fn main() -> Result<()> {
     }
 
     match cli.file {
-        Some(_) => {
+        Some(ref path) => {
+            // Autodetect: if the file starts with the "blox" magic, run via VM
+            if is_bytecode_file(path)? {
+                let compiled = load_chunk(path)?;
+                let mut vm = vibe_lox::vm::vm::Vm::new();
+                vm.interpret(compiled)
+                    .map_err(|e| report_runtime_error(&e, None))?;
+                return Ok(());
+            }
             let source = read_source(&cli)?;
             let filename = get_filename(&cli);
             run_source(&source, &filename)?;

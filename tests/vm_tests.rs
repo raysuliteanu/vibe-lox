@@ -12,8 +12,8 @@ fn run_vm_fixture(source: &str) -> Vec<String> {
 
 fn run_vm_roundtrip(source: &str) -> Vec<String> {
     let compiled = compile_to_chunk(source).expect("compile should succeed");
-    let json = serde_json::to_vec(&compiled).expect("serialize should succeed");
-    let loaded: chunk::Chunk = serde_json::from_slice(&json).expect("deserialize should succeed");
+    let bytes = rmp_serde::to_vec(&compiled).expect("serialize should succeed");
+    let loaded: chunk::Chunk = rmp_serde::from_slice(&bytes).expect("deserialize should succeed");
     let mut vm = Vm::new();
     vm.interpret(loaded).expect("interpret should succeed");
     vm.output().to_vec()
@@ -123,4 +123,22 @@ fn vm_backtrace_top_level_has_script_frame() {
     let frames = err.backtrace_frames();
     assert_eq!(frames.len(), 1);
     assert_eq!(frames[0].function_name, "<script>");
+}
+
+#[test]
+fn vm_bytecode_roundtrip_with_magic_header() {
+    let compiled = compile_to_chunk("print 1 + 2;").expect("compile should succeed");
+    let payload = rmp_serde::to_vec(&compiled).expect("serialize should succeed");
+
+    let mut bytes = Vec::with_capacity(4 + payload.len());
+    bytes.extend_from_slice(b"blox");
+    bytes.extend_from_slice(&payload);
+
+    assert_eq!(&bytes[..4], b"blox", "file should start with magic header");
+
+    let loaded: chunk::Chunk =
+        rmp_serde::from_slice(&bytes[4..]).expect("deserialize should succeed");
+    let mut vm = Vm::new();
+    vm.interpret(loaded).expect("interpret should succeed");
+    assert_eq!(vm.output(), &["3"]);
 }
