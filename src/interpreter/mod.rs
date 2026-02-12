@@ -9,7 +9,7 @@ use std::io::Write;
 use std::rc::Rc;
 
 use crate::ast::*;
-use crate::error::RuntimeError;
+use crate::error::{RuntimeError, StackFrame};
 use crate::interpreter::callable::{Callable, LoxFunction, NativeFunction};
 use crate::interpreter::environment::Environment;
 use crate::interpreter::value::{LoxClass, LoxInstance, Value};
@@ -21,6 +21,10 @@ pub struct Interpreter {
     output: Vec<String>,
     /// Writer for print output (allows testing without stdout)
     writer: Box<dyn Write>,
+    /// Tracks the active call stack for backtrace on runtime errors.
+    call_stack: Vec<StackFrame>,
+    /// Source code, retained for computing line numbers in backtraces.
+    source: String,
 }
 
 impl Default for Interpreter {
@@ -43,6 +47,8 @@ impl Interpreter {
             locals: HashMap::new(),
             output: Vec::new(),
             writer: Box::new(std::io::stdout()),
+            call_stack: Vec::new(),
+            source: String::new(),
         }
     }
 
@@ -61,7 +67,14 @@ impl Interpreter {
             locals: HashMap::new(),
             output: Vec::new(),
             writer: Box::new(Vec::<u8>::new()),
+            call_stack: Vec::new(),
+            source: String::new(),
         }
+    }
+
+    /// Set the source code for line-number computation in backtraces.
+    pub fn set_source(&mut self, source: &str) {
+        self.source = source.to_string();
     }
 
     pub fn interpret(
@@ -404,7 +417,7 @@ impl Interpreter {
                         c.span,
                     ));
                 }
-                self.call_function(&func, args)
+                self.call_function(&func, args, c.span)
             }
             Value::Class(class) => {
                 let instance = Rc::new(RefCell::new(LoxInstance::new(Rc::clone(&class))));
@@ -416,7 +429,7 @@ impl Interpreter {
                         ));
                     }
                     let bound = init.bind(Rc::clone(&instance));
-                    self.call_function(&bound, args)?;
+                    self.call_function(&bound, args, c.span)?;
                 } else if !args.is_empty() {
                     return Err(RuntimeError::with_span(
                         format!("expected 0 arguments but got {}", args.len()),
@@ -432,10 +445,38 @@ impl Interpreter {
         }
     }
 
-    fn call_function(&mut self, func: &Callable, args: Vec<Value>) -> Result<Value, RuntimeError> {
+    /// Snapshot the current call stack into a Vec<StackFrame> for backtrace display.
+    /// Returns frames in innermost-first order (most recent call at index 0).
+    fn snapshot_backtrace(&self) -> Vec<StackFrame> {
+        let mut frames = self.call_stack.clone();
+        frames.reverse();
+        frames
+    }
+
+    /// Compute the 1-based line number from a byte offset in the stored source.
+    fn offset_to_line(&self, offset: usize) -> usize {
+        self.source[..offset.min(self.source.len())]
+            .chars()
+            .filter(|&c| c == '\n')
+            .count()
+            + 1
+    }
+
+    fn call_function(
+        &mut self,
+        func: &Callable,
+        args: Vec<Value>,
+        call_site_span: crate::scanner::token::Span,
+    ) -> Result<Value, RuntimeError> {
         match func {
             Callable::Native(native) => Ok(native.call(&args)),
             Callable::User(user_fn) => {
+                let frame = StackFrame {
+                    function_name: user_fn.declaration.name.clone(),
+                    line: self.offset_to_line(call_site_span.offset),
+                };
+                self.call_stack.push(frame);
+
                 let env = Rc::new(RefCell::new(Environment::with_enclosing(Rc::clone(
                     &user_fn.closure,
                 ))));
@@ -447,8 +488,8 @@ impl Interpreter {
 
                 match result {
                     Ok(()) => {
+                        self.call_stack.pop();
                         if user_fn.is_initializer {
-                            // Return 'this' from init
                             Ok(user_fn
                                 .closure
                                 .borrow()
@@ -459,6 +500,7 @@ impl Interpreter {
                         }
                     }
                     Err(RuntimeError::Return { value }) => {
+                        self.call_stack.pop();
                         if user_fn.is_initializer {
                             Ok(user_fn
                                 .closure
@@ -469,7 +511,16 @@ impl Interpreter {
                             Ok(value)
                         }
                     }
-                    Err(e) => Err(e),
+                    Err(e) => {
+                        // Snapshot backtrace before popping so the current frame is included
+                        let err = if e.backtrace_frames().is_empty() {
+                            e.with_backtrace(self.snapshot_backtrace())
+                        } else {
+                            e
+                        };
+                        self.call_stack.pop();
+                        Err(err)
+                    }
                 }
             }
         }

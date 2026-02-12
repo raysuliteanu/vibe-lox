@@ -415,6 +415,8 @@ pub struct Interpreter {
     locals: HashMap<ExprId, usize>,  // From resolver
     output: Vec<String>,              // For testing
     writer: Box<dyn Write>,           // stdout or capture
+    call_stack: Vec<StackFrame>,      // For backtrace on runtime errors
+    source: String,                   // Source code for line number calculation
 }
 
 impl Interpreter {
@@ -987,14 +989,21 @@ lox::parse
 **Used for:** Interpreter and VM runtime errors
 
 ```rust
+/// A single frame in the Lox call stack, captured at the point of a runtime error.
+pub struct StackFrame {
+    pub function_name: String,
+    pub line: usize,
+}
+
 #[derive(Error, Debug)]
 pub enum RuntimeError {
     #[error("Error: {message}")]
     Error {
         message: String,
-        span: Option<Span>,  // Only available in interpreter mode
+        span: Option<Span>,           // Only available in interpreter mode
+        backtrace: Vec<StackFrame>,   // Call stack snapshot at error site
     },
-    
+
     #[error("return")]
     Return {
         value: Value,  // Control flow, not really an error
@@ -1004,10 +1013,16 @@ pub enum RuntimeError {
 impl RuntimeError {
     pub fn new(message: impl Into<String>) -> Self
     pub fn with_span(message: impl Into<String>, span: Span) -> Self
+    pub fn with_backtrace(self, frames: Vec<StackFrame>) -> Self
+    pub fn backtrace_frames(&self) -> &[StackFrame]
     pub fn display_with_line(&self, source: &str) -> String
     pub fn is_return(&self) -> bool
     pub fn into_return_value(self) -> Option<Value>
 }
+
+// Backtrace formatting helpers
+pub fn format_backtrace(frames: &[StackFrame]) -> String
+pub fn backtrace_enabled() -> bool  // checks LOX_BACKTRACE env var
 ```
 
 **Example output (interpreter with source):**
@@ -1015,9 +1030,14 @@ impl RuntimeError {
 Error: line 3: operands must be two numbers or two strings
 ```
 
-**Example output (VM without source):**
+**Example output (VM with line numbers and backtrace, `LOX_BACKTRACE=1`):**
 ```
-Error: operands must be numbers
+Error: line 6: operand must be a number
+stack backtrace:
+  0: inner()        [line 6]
+  1: middle()       [line 10]
+  2: outer()        [line 13]
+  3: <script>()     [line 15]
 ```
 
 ### Line Number Calculation
@@ -1038,7 +1058,22 @@ fn offset_to_line(source: &str, offset: usize) -> usize {
 - Only called when displaying errors (not during execution)
 - Simple linear scan - acceptable performance for error cases
 - Allows keeping `Span` simple (just offset + len, no line/column)
-- Interpreter can show line numbers, VM can't (and that's okay)
+- Both interpreter and VM provide line numbers (interpreter via spans, VM via chunk line tables)
+
+### Stack Backtraces
+
+Both the interpreter and VM support optional stack backtraces, controlled by the
+`LOX_BACKTRACE` environment variable (set to `1` or `full`):
+
+- **Interpreter:** Maintains a `call_stack: Vec<StackFrame>` field. Pushes a frame
+  in `call_function()` before executing the body, pops after. On error, snapshots
+  the call stack before popping and attaches it to the error via `with_backtrace()`.
+
+- **VM:** The `runtime_error()` helper snapshots `self.frames` (which already tracks
+  the call stack) into `Vec<StackFrame>`, reversing to innermost-first order. Also
+  extracts line numbers from `chunk.lines[ip]` for each frame.
+
+Both backends produce frames in innermost-first order (most recent call at index 0).
 
 ### When to Use Each Error Type
 
@@ -1048,7 +1083,7 @@ fn offset_to_line(source: &str, offset: usize) -> usize {
 | Syntax error | `CompileError::Parse` | Yes (miette) | Yes (miette) |
 | Semantic error | `CompileError::Resolve` | Yes (miette) | Yes (miette) |
 | Interpreter runtime | `RuntimeError::Error` | Optional span | Yes (calculated) |
-| VM runtime | `RuntimeError::Error` | No span | No |
+| VM runtime | `RuntimeError::Error` | No span | Yes (from chunk line table) |
 | Function return | `RuntimeError::Return` | N/A | N/A (control flow) |
 
 ### Error Display Format
@@ -1069,9 +1104,9 @@ lox::parse
 Error: line 42: undefined variable 'x'
 ```
 
-**Runtime errors (VM):**
+**Runtime errors (VM, now with line numbers):**
 ```
-Error: operands must be numbers
+Error: line 3: operands must be numbers
 ```
 
 ### Error Recovery

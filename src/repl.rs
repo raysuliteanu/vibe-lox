@@ -72,10 +72,17 @@ pub fn run_repl() {
         };
 
         interpreter.merge_locals(locals);
+        interpreter.set_source(&source);
         if let Err(e) = interpreter.interpret_additional(&program)
             && !e.is_return()
         {
             eprintln!("{}", e.display_with_line(&source));
+            if crate::error::backtrace_enabled() {
+                let bt = crate::error::format_backtrace(e.backtrace_frames());
+                if !bt.is_empty() {
+                    eprint!("{bt}");
+                }
+            }
         }
     }
 }
