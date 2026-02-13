@@ -4,8 +4,9 @@ use inkwell::module::Module;
 use inkwell::values::{BasicValueEnum, FunctionValue, StructValue};
 
 use crate::ast::{
-    AssignExpr, BinaryExpr, BinaryOp, Decl, Expr, ExprStmt, LiteralExpr, LiteralValue, PrintStmt,
-    Program, Stmt, UnaryExpr, UnaryOp, VarDecl, VariableExpr,
+    AssignExpr, BinaryExpr, BinaryOp, BlockStmt, Decl, Expr, ExprStmt, IfStmt, LiteralExpr,
+    LiteralValue, LogicalExpr, LogicalOp, PrintStmt, Program, Stmt, UnaryExpr, UnaryOp, VarDecl,
+    VariableExpr, WhileStmt,
 };
 
 use super::runtime::RuntimeDecls;
@@ -92,9 +93,9 @@ impl<'ctx> CodeGen<'ctx> {
         match stmt {
             Stmt::Print(print_stmt) => self.compile_print_stmt(print_stmt),
             Stmt::Expression(expr_stmt) => self.compile_expr_stmt(expr_stmt),
-            Stmt::Block(_) => anyhow::bail!("block statements not yet supported in LLVM codegen"),
-            Stmt::If(_) => anyhow::bail!("if statements not yet supported in LLVM codegen"),
-            Stmt::While(_) => anyhow::bail!("while statements not yet supported in LLVM codegen"),
+            Stmt::Block(block) => self.compile_block(block),
+            Stmt::If(if_stmt) => self.compile_if(if_stmt),
+            Stmt::While(while_stmt) => self.compile_while(while_stmt),
             Stmt::Return(_) => {
                 anyhow::bail!("return statements not yet supported in LLVM codegen")
             }
@@ -114,6 +115,92 @@ impl<'ctx> CodeGen<'ctx> {
         Ok(())
     }
 
+    fn compile_block(&mut self, block: &BlockStmt) -> anyhow::Result<()> {
+        for decl in &block.declarations {
+            self.compile_decl(decl)?;
+        }
+        Ok(())
+    }
+
+    fn compile_if(&mut self, if_stmt: &IfStmt) -> anyhow::Result<()> {
+        let current_fn = self.current_fn.expect("must be inside a function");
+
+        // Evaluate condition and convert to i1 via lox_value_truthy
+        let condition = self.compile_expr(&if_stmt.condition)?;
+        let cond_bool = self.emit_truthy(condition);
+
+        let then_bb = self.context.append_basic_block(current_fn, "then");
+        let merge_bb = self.context.append_basic_block(current_fn, "merge");
+
+        if let Some(else_branch) = &if_stmt.else_branch {
+            let else_bb = self.context.append_basic_block(current_fn, "else");
+            self.builder
+                .build_conditional_branch(cond_bool, then_bb, else_bb)
+                .expect("conditional branch");
+
+            // Then branch
+            self.builder.position_at_end(then_bb);
+            self.compile_stmt(&if_stmt.then_branch)?;
+            self.builder
+                .build_unconditional_branch(merge_bb)
+                .expect("branch to merge from then");
+
+            // Else branch
+            self.builder.position_at_end(else_bb);
+            self.compile_stmt(else_branch)?;
+            self.builder
+                .build_unconditional_branch(merge_bb)
+                .expect("branch to merge from else");
+        } else {
+            self.builder
+                .build_conditional_branch(cond_bool, then_bb, merge_bb)
+                .expect("conditional branch");
+
+            // Then branch
+            self.builder.position_at_end(then_bb);
+            self.compile_stmt(&if_stmt.then_branch)?;
+            self.builder
+                .build_unconditional_branch(merge_bb)
+                .expect("branch to merge from then");
+        }
+
+        // Continue at merge point
+        self.builder.position_at_end(merge_bb);
+        Ok(())
+    }
+
+    fn compile_while(&mut self, while_stmt: &WhileStmt) -> anyhow::Result<()> {
+        let current_fn = self.current_fn.expect("must be inside a function");
+
+        let cond_bb = self.context.append_basic_block(current_fn, "while_cond");
+        let body_bb = self.context.append_basic_block(current_fn, "while_body");
+        let exit_bb = self.context.append_basic_block(current_fn, "while_exit");
+
+        // Jump to condition check
+        self.builder
+            .build_unconditional_branch(cond_bb)
+            .expect("branch to while condition");
+
+        // Condition block
+        self.builder.position_at_end(cond_bb);
+        let condition = self.compile_expr(&while_stmt.condition)?;
+        let cond_bool = self.emit_truthy(condition);
+        self.builder
+            .build_conditional_branch(cond_bool, body_bb, exit_bb)
+            .expect("while conditional branch");
+
+        // Body block
+        self.builder.position_at_end(body_bb);
+        self.compile_stmt(&while_stmt.body)?;
+        self.builder
+            .build_unconditional_branch(cond_bb)
+            .expect("loop back to condition");
+
+        // Exit
+        self.builder.position_at_end(exit_bb);
+        Ok(())
+    }
+
     fn compile_expr(&mut self, expr: &Expr) -> anyhow::Result<StructValue<'ctx>> {
         match expr {
             Expr::Literal(lit) => self.compile_literal(lit),
@@ -122,9 +209,7 @@ impl<'ctx> CodeGen<'ctx> {
             Expr::Grouping(g) => self.compile_expr(&g.expression),
             Expr::Variable(var) => self.compile_variable(var),
             Expr::Assign(assign) => self.compile_assign(assign),
-            Expr::Logical(_) => {
-                anyhow::bail!("logical expressions not yet supported in LLVM codegen")
-            }
+            Expr::Logical(logical) => self.compile_logical(logical),
             Expr::Call(_) => {
                 anyhow::bail!("call expressions not yet supported in LLVM codegen")
             }
@@ -335,6 +420,51 @@ impl<'ctx> CodeGen<'ctx> {
         }
     }
 
+    fn compile_logical(&mut self, logical: &LogicalExpr) -> anyhow::Result<StructValue<'ctx>> {
+        let current_fn = self.current_fn.expect("must be inside a function");
+
+        let left = self.compile_expr(&logical.left)?;
+        let left_truthy = self.emit_truthy(left);
+
+        let rhs_bb = self.context.append_basic_block(current_fn, "log_rhs");
+        let merge_bb = self.context.append_basic_block(current_fn, "log_merge");
+
+        // Record which block the left value was computed in (for the phi node)
+        let left_bb = self.builder.get_insert_block().expect("have insert block");
+
+        match logical.operator {
+            LogicalOp::And => {
+                // Short-circuit: if left is falsy, skip right and use left
+                self.builder
+                    .build_conditional_branch(left_truthy, rhs_bb, merge_bb)
+                    .expect("and short-circuit branch");
+            }
+            LogicalOp::Or => {
+                // Short-circuit: if left is truthy, skip right and use left
+                self.builder
+                    .build_conditional_branch(left_truthy, merge_bb, rhs_bb)
+                    .expect("or short-circuit branch");
+            }
+        }
+
+        // Evaluate right operand
+        self.builder.position_at_end(rhs_bb);
+        let right = self.compile_expr(&logical.right)?;
+        let rhs_exit_bb = self.builder.get_insert_block().expect("have insert block");
+        self.builder
+            .build_unconditional_branch(merge_bb)
+            .expect("branch to merge from rhs");
+
+        // Merge: use phi to select left or right value
+        self.builder.position_at_end(merge_bb);
+        let phi = self
+            .builder
+            .build_phi(self.lox_value.llvm_type(), "log_result")
+            .expect("build phi for logical");
+        phi.add_incoming(&[(&left, left_bb), (&right, rhs_exit_bb)]);
+        Ok(phi.as_basic_value().into_struct_value())
+    }
+
     fn compile_variable(&mut self, var: &VariableExpr) -> anyhow::Result<StructValue<'ctx>> {
         Ok(self.emit_global_get(&var.name))
     }
@@ -345,7 +475,19 @@ impl<'ctx> CodeGen<'ctx> {
         Ok(value)
     }
 
-    // --- Helpers for global variable access ---
+    // --- Helpers ---
+
+    /// Call `lox_value_truthy` to convert a LoxValue to an LLVM i1.
+    fn emit_truthy(&mut self, value: StructValue<'ctx>) -> inkwell::values::IntValue<'ctx> {
+        self.builder
+            .build_call(self.runtime.lox_value_truthy, &[value.into()], "truthy")
+            .expect("call lox_value_truthy")
+            .try_as_basic_value()
+            .unwrap_basic()
+            .into_int_value()
+    }
+
+    // --- Global variable access ---
 
     fn emit_global_get(&mut self, name: &str) -> StructValue<'ctx> {
         let (name_ptr, name_len) = self.build_string_constant(name);
@@ -513,5 +655,77 @@ mod tests {
         // the IR compiles and calls lox_print with a result.
         let ir = compile_to_ir("print (1 + 2) * 3 - 4 / 2;");
         assert!(ir.contains("call void @lox_print"));
+    }
+
+    // --- Phase 2: Control flow ---
+
+    #[test]
+    fn if_then() {
+        let ir = compile_to_ir("if (true) print 1;");
+        assert!(ir.contains("br i1"), "should contain conditional branch");
+        assert!(ir.contains("then"), "should have then block");
+        assert!(ir.contains("merge"), "should have merge block");
+    }
+
+    #[test]
+    fn if_else() {
+        let ir = compile_to_ir("if (true) print 1; else print 2;");
+        assert!(ir.contains("then"), "should have then block");
+        assert!(ir.contains("else"), "should have else block");
+        assert!(ir.contains("merge"), "should have merge block");
+    }
+
+    #[test]
+    fn while_loop() {
+        let ir = compile_to_ir("var i = 0; while (i < 3) i = i + 1;");
+        assert!(ir.contains("while_cond"), "should have condition block");
+        assert!(ir.contains("while_body"), "should have body block");
+        assert!(ir.contains("while_exit"), "should have exit block");
+    }
+
+    #[test]
+    fn for_loop() {
+        // Parser desugars for to while, so the IR should look the same
+        let ir = compile_to_ir("for (var i = 0; i < 3; i = i + 1) print i;");
+        assert!(ir.contains("while_cond"), "for desugars to while");
+    }
+
+    #[test]
+    fn block_statement() {
+        let ir = compile_to_ir("{ print 1; print 2; }");
+        // Block just sequences declarations; verify two print calls
+        let print_count = ir.matches("call void @lox_print").count();
+        assert_eq!(print_count, 2, "should have two print calls");
+    }
+
+    #[test]
+    fn logical_and() {
+        let ir = compile_to_ir("var a = true; var b = false; print a and b;");
+        assert!(ir.contains("log_rhs"), "should have rhs block for and");
+        assert!(ir.contains("log_merge"), "should have merge block for and");
+    }
+
+    #[test]
+    fn logical_or() {
+        let ir = compile_to_ir("var a = false; var b = true; print a or b;");
+        assert!(ir.contains("log_rhs"), "should have rhs block for or");
+        assert!(ir.contains("log_merge"), "should have merge block for or");
+    }
+
+    #[test]
+    fn nested_if() {
+        let ir = compile_to_ir(
+            "var x = 10; if (x > 5) { if (x > 20) print 1; else print 2; } else print 3;",
+        );
+        // Should have multiple then/else/merge blocks
+        let then_count = ir.matches("then").count();
+        assert!(then_count >= 2, "should have nested then blocks");
+    }
+
+    #[test]
+    fn while_with_logical_condition() {
+        let ir = compile_to_ir("var a = 0; var b = 1; while (a < 5 and b > 0) { a = a + 1; }");
+        assert!(ir.contains("while_cond"));
+        assert!(ir.contains("log_rhs"), "and in while condition");
     }
 }

@@ -65,3 +65,10 @@ fn llvm_fixture_hello() {
     let expected = include_str!("../fixtures/hello.expected");
     assert_eq!(output, expected);
 }
+
+#[test]
+fn llvm_fixture_control_flow() {
+    let output = run_llvm_fixture("control_flow.lox");
+    let expected = include_str!("../fixtures/control_flow.expected");
+    assert_eq!(output, expected);
+}
