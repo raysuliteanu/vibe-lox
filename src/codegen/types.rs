@@ -122,6 +122,16 @@ impl<'ctx> LoxValueType<'ctx> {
             .into_float_value()
     }
 
+    /// Build a LoxValue from a tag constant and an i64 payload (public).
+    pub fn build_tagged_value_with_int(
+        &self,
+        builder: &Builder<'ctx>,
+        tag: u8,
+        payload: IntValue<'ctx>,
+    ) -> StructValue<'ctx> {
+        self.build_tagged_value(builder, tag, payload)
+    }
+
     /// Build a LoxValue from a tag constant and an i64 payload.
     fn build_tagged_value(
         &self,

@@ -1,3 +1,4 @@
+pub mod capture;
 pub mod compiler;
 pub mod runtime;
 pub mod types;
@@ -12,12 +13,12 @@ use crate::interpreter::resolver::Resolver;
 
 /// Compile a Lox AST to LLVM IR and return the IR as a string.
 ///
-/// Runs the resolver to determine local vs global variable bindings,
-/// then generates LLVM IR.
+/// Runs the resolver and capture analysis, then generates LLVM IR.
 pub fn compile(program: &Program) -> Result<String> {
     let locals = resolve(program)?;
+    let captures = capture::analyze_captures(program);
     let context = Context::create();
-    let codegen = compiler::CodeGen::new(&context, "lox", locals);
+    let codegen = compiler::CodeGen::new(&context, "lox", locals, captures);
     codegen.compile(program)
 }
 

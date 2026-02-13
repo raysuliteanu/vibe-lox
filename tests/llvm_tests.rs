@@ -79,3 +79,17 @@ fn llvm_fixture_scoping() {
     let expected = include_str!("../fixtures/scoping.expected");
     assert_eq!(output, expected);
 }
+
+#[test]
+fn llvm_fixture_fib() {
+    let output = run_llvm_fixture("fib.lox");
+    let expected = include_str!("../fixtures/fib.expected");
+    assert_eq!(output, expected);
+}
+
+#[test]
+fn llvm_fixture_counter() {
+    let output = run_llvm_fixture("counter.lox");
+    let expected = include_str!("../fixtures/counter.expected");
+    assert_eq!(output, expected);
+}

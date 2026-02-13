@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 /* Simple global variable store using a linear search table.
  * Adequate for the small number of globals in typical Lox programs.
@@ -60,6 +61,11 @@ void lox_print(LoxValue value) {
     printf("%s\n", s);
     break;
   }
+  case TAG_FUNCTION: {
+    LoxClosure *closure = (LoxClosure *)(intptr_t)value.payload;
+    printf("<fn %s>\n", closure->name ? closure->name : "?");
+    break;
+  }
   default:
     printf("<unknown value tag %d>\n", value.tag);
     break;
@@ -114,4 +120,40 @@ void lox_runtime_error(const char *message, int64_t message_len, int32_t line) {
     fprintf(stderr, "Error: %.*s\n", (int)message_len, message);
   }
   exit(70);
+}
+
+LoxClosure *lox_alloc_closure(void *fn_ptr, int32_t arity, const char *name,
+                               LoxValue **env, int32_t env_count) {
+  LoxClosure *closure = malloc(sizeof(LoxClosure));
+  closure->fn_ptr = fn_ptr;
+  closure->arity = arity;
+  closure->name = name;
+  closure->env_count = env_count;
+  if (env_count > 0 && env != NULL) {
+    closure->env = malloc(sizeof(LoxValue *) * (size_t)env_count);
+    memcpy(closure->env, env, sizeof(LoxValue *) * (size_t)env_count);
+  } else {
+    closure->env = NULL;
+  }
+  return closure;
+}
+
+LoxCell *lox_alloc_cell(LoxValue initial) {
+  LoxCell *cell = malloc(sizeof(LoxCell));
+  *cell = initial;
+  return cell;
+}
+
+LoxValue lox_cell_get(LoxCell *cell) { return *cell; }
+
+void lox_cell_set(LoxCell *cell, LoxValue value) { *cell = value; }
+
+LoxValue lox_clock(void) {
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  double secs = (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+  LoxValue v;
+  v.tag = TAG_NUMBER;
+  memcpy(&v.payload, &secs, sizeof(double));
+  return v;
 }

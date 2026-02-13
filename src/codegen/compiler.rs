@@ -1,42 +1,67 @@
 use std::collections::HashMap;
 
+use inkwell::AddressSpace;
 use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::module::Module;
-use inkwell::values::{BasicValueEnum, FunctionValue, PointerValue, StructValue};
-
-use crate::ast::{
-    AssignExpr, BinaryExpr, BinaryOp, BlockStmt, Decl, Expr, ExprId, ExprStmt, IfStmt, LiteralExpr,
-    LiteralValue, LogicalExpr, LogicalOp, PrintStmt, Program, Stmt, UnaryExpr, UnaryOp, VarDecl,
-    VariableExpr, WhileStmt,
+use inkwell::values::{
+    BasicMetadataValueEnum, BasicValueEnum, FunctionValue, PointerValue, StructValue,
 };
 
+use crate::ast::{
+    AssignExpr, BinaryExpr, BinaryOp, BlockStmt, CallExpr, Decl, Expr, ExprId, ExprStmt, FunDecl,
+    IfStmt, LiteralExpr, LiteralValue, LogicalExpr, LogicalOp, PrintStmt, Program, ReturnStmt,
+    Stmt, UnaryExpr, UnaryOp, VarDecl, VariableExpr, WhileStmt,
+};
+
+use super::capture::{CaptureInfo, CapturedVar};
 use super::runtime::RuntimeDecls;
 use super::types::LoxValueType;
+
+/// Tracks how a local variable is stored.
+#[derive(Clone)]
+enum VarStorage<'ctx> {
+    /// Stack-allocated via alloca (not captured by any closure).
+    Alloca(PointerValue<'ctx>),
+    /// Heap-allocated cell (captured by at least one closure).
+    /// The PointerValue points to the cell (LoxValue*).
+    Cell(PointerValue<'ctx>),
+}
 
 /// LLVM IR code generator for Lox programs.
 ///
 /// Walks the AST and emits LLVM IR using inkwell. Handles literals, arithmetic,
 /// comparisons, unary ops, print, global and local variables, control flow,
-/// and logical operators.
+/// logical operators, functions, closures, and return statements.
 pub struct CodeGen<'ctx> {
     context: &'ctx Context,
     module: Module<'ctx>,
     builder: Builder<'ctx>,
     lox_value: LoxValueType<'ctx>,
     runtime: RuntimeDecls<'ctx>,
-    /// The current function being compiled into.
+    /// The current LLVM function being compiled into.
     current_fn: Option<FunctionValue<'ctx>>,
     /// Variable resolution results from the resolver: ExprId → scope depth.
     /// If an ExprId is present, the variable is local; otherwise it's global.
     locals: HashMap<ExprId, usize>,
     /// Stack of local variable scopes. Each scope maps variable names to
-    /// their alloca pointers (which store LoxValue structs).
-    scopes: Vec<HashMap<String, PointerValue<'ctx>>>,
+    /// their storage (alloca or cell pointer).
+    scopes: Vec<HashMap<String, VarStorage<'ctx>>>,
+    /// Capture analysis results.
+    captures: CaptureInfo,
+    /// Name of the Lox function currently being compiled (empty = top-level).
+    current_lox_fn: String,
+    /// For return statements: alloca for the return value and the exit block.
+    return_target: Option<(PointerValue<'ctx>, inkwell::basic_block::BasicBlock<'ctx>)>,
 }
 
 impl<'ctx> CodeGen<'ctx> {
-    pub fn new(context: &'ctx Context, module_name: &str, locals: HashMap<ExprId, usize>) -> Self {
+    pub fn new(
+        context: &'ctx Context,
+        module_name: &str,
+        locals: HashMap<ExprId, usize>,
+        captures: CaptureInfo,
+    ) -> Self {
         let module = context.create_module(module_name);
         let builder = context.create_builder();
         let lox_value = LoxValueType::new(context);
@@ -50,6 +75,9 @@ impl<'ctx> CodeGen<'ctx> {
             current_fn: None,
             locals,
             scopes: Vec::new(),
+            captures,
+            current_lox_fn: String::new(),
+            return_target: None,
         }
     }
 
@@ -67,6 +95,9 @@ impl<'ctx> CodeGen<'ctx> {
         self.builder.position_at_end(entry);
         self.current_fn = Some(main_fn);
 
+        // Register native clock() function
+        self.register_native_clock()?;
+
         for decl in &program.declarations {
             self.compile_decl(decl)?;
         }
@@ -78,13 +109,47 @@ impl<'ctx> CodeGen<'ctx> {
         Ok(())
     }
 
+    /// Register the native `clock()` function as a global.
+    fn register_native_clock(&mut self) -> anyhow::Result<()> {
+        // Create a wrapper LLVM function that ignores env and calls lox_clock
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        let lv_type = self.lox_value.llvm_type();
+        let clock_fn_type = lv_type.fn_type(&[ptr_type.into()], false);
+        let clock_fn = self
+            .module
+            .add_function("lox_clock_wrapper", clock_fn_type, None);
+        let entry = self.context.append_basic_block(clock_fn, "entry");
+
+        // Save/restore builder position
+        let saved_bb = self.builder.get_insert_block();
+        self.builder.position_at_end(entry);
+
+        let result = self
+            .builder
+            .build_call(self.runtime.lox_clock, &[], "clock_val")
+            .expect("call lox_clock")
+            .try_as_basic_value()
+            .unwrap_basic();
+        self.builder
+            .build_return(Some(&result))
+            .expect("return from clock wrapper");
+
+        if let Some(bb) = saved_bb {
+            self.builder.position_at_end(bb);
+        }
+
+        // Create a closure for clock and store as global
+        let closure_val = self.build_closure(clock_fn, "clock", &[])?;
+        self.emit_global_set("clock", closure_val);
+
+        Ok(())
+    }
+
     fn compile_decl(&mut self, decl: &Decl) -> anyhow::Result<()> {
         match decl {
             Decl::Var(var_decl) => self.compile_var_decl(var_decl),
             Decl::Statement(stmt) => self.compile_stmt(stmt),
-            Decl::Fun(_) => {
-                anyhow::bail!("function declarations not yet supported in LLVM codegen")
-            }
+            Decl::Fun(fun_decl) => self.compile_fun_decl(fun_decl),
             Decl::Class(_) => {
                 anyhow::bail!("class declarations not yet supported in LLVM codegen")
             }
@@ -101,15 +166,35 @@ impl<'ctx> CodeGen<'ctx> {
             // Top-level: store as global
             self.emit_global_set(&var_decl.name, value);
         } else {
-            // Local: create alloca in entry block and store value
-            let alloca = self.create_entry_block_alloca(&var_decl.name);
-            self.builder
-                .build_store(alloca, value)
-                .expect("store local var initializer");
+            // Check if this variable is captured by an inner function
+            let is_captured = self.captures.captured_vars.contains(&CapturedVar {
+                var_name: var_decl.name.clone(),
+                declaring_function: self.current_lox_fn.clone(),
+            });
+
+            let storage = if is_captured {
+                // Captured: allocate a heap cell so closures can share it
+                let cell = self
+                    .builder
+                    .build_call(self.runtime.lox_alloc_cell, &[value.into()], "cell")
+                    .expect("call lox_alloc_cell")
+                    .try_as_basic_value()
+                    .unwrap_basic()
+                    .into_pointer_value();
+                VarStorage::Cell(cell)
+            } else {
+                // Not captured: use stack alloca
+                let alloca = self.create_entry_block_alloca(&var_decl.name);
+                self.builder
+                    .build_store(alloca, value)
+                    .expect("store local var initializer");
+                VarStorage::Alloca(alloca)
+            };
+
             self.scopes
                 .last_mut()
                 .expect("checked non-empty above")
-                .insert(var_decl.name.clone(), alloca);
+                .insert(var_decl.name.clone(), storage);
         }
         Ok(())
     }
@@ -121,9 +206,7 @@ impl<'ctx> CodeGen<'ctx> {
             Stmt::Block(block) => self.compile_block(block),
             Stmt::If(if_stmt) => self.compile_if(if_stmt),
             Stmt::While(while_stmt) => self.compile_while(while_stmt),
-            Stmt::Return(_) => {
-                anyhow::bail!("return statements not yet supported in LLVM codegen")
-            }
+            Stmt::Return(ret) => self.compile_return(ret),
         }
     }
 
@@ -147,6 +230,407 @@ impl<'ctx> CodeGen<'ctx> {
         }
         self.end_scope();
         Ok(())
+    }
+
+    fn compile_fun_decl(&mut self, fun_decl: &FunDecl) -> anyhow::Result<()> {
+        let function = &fun_decl.function;
+        let fn_name = &function.name;
+
+        // Determine which variables this function captures from enclosing scopes
+        let captured_names = self
+            .captures
+            .function_captures
+            .get(fn_name)
+            .cloned()
+            .unwrap_or_default();
+
+        // Build the LLVM function type: (ptr %env, LoxValue %arg0, ...) -> LoxValue
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        let lv_type = self.lox_value.llvm_type();
+        let mut param_types: Vec<inkwell::types::BasicMetadataTypeEnum> = vec![ptr_type.into()];
+        for _ in &function.params {
+            param_types.push(lv_type.into());
+        }
+        let fn_type = lv_type.fn_type(&param_types, false);
+        let llvm_fn_name = format!("lox_fn_{fn_name}");
+        let llvm_fn = self.module.add_function(&llvm_fn_name, fn_type, None);
+
+        // Save the current compilation state
+        let saved_fn = self.current_fn;
+        let saved_lox_fn = self.current_lox_fn.clone();
+        let saved_scopes = std::mem::take(&mut self.scopes);
+        let saved_return_target = self.return_target.take();
+        let saved_insert_block = self.builder.get_insert_block();
+
+        // Set up for compiling the function body
+        self.current_fn = Some(llvm_fn);
+        self.current_lox_fn = fn_name.clone();
+
+        let entry_bb = self.context.append_basic_block(llvm_fn, "entry");
+        let exit_bb = self.context.append_basic_block(llvm_fn, "exit");
+        self.builder.position_at_end(entry_bb);
+
+        // Create return value alloca and set up return target
+        let ret_alloca = self.create_entry_block_alloca("retval");
+        // Initialize to nil (implicit return)
+        self.builder
+            .build_store(ret_alloca, self.lox_value.build_nil(&self.builder))
+            .expect("store initial retval");
+        self.return_target = Some((ret_alloca, exit_bb));
+
+        // Create a scope for the function body
+        self.begin_scope();
+
+        // Bind the env parameter: load captured cells from the env array
+        let env_param = llvm_fn
+            .get_nth_param(0)
+            .expect("env parameter exists")
+            .into_pointer_value();
+
+        for (i, cap_name) in captured_names.iter().enumerate() {
+            // env is an array of LoxValue* (cell pointers)
+            // Load the i-th cell pointer from the env array
+            let cell_ptr_ptr = unsafe {
+                self.builder
+                    .build_gep(
+                        ptr_type,
+                        env_param,
+                        &[self.context.i64_type().const_int(i as u64, false)],
+                        &format!("env_{cap_name}_ptr"),
+                    )
+                    .expect("GEP into env array")
+            };
+            let cell_ptr = self
+                .builder
+                .build_load(ptr_type, cell_ptr_ptr, &format!("env_{cap_name}"))
+                .expect("load cell ptr from env")
+                .into_pointer_value();
+            self.scopes
+                .last_mut()
+                .expect("have scope")
+                .insert(cap_name.clone(), VarStorage::Cell(cell_ptr));
+        }
+
+        // Bind parameters as local variables
+        for (i, param_name) in function.params.iter().enumerate() {
+            let param_val = llvm_fn
+                .get_nth_param((i + 1) as u32)
+                .expect("parameter exists")
+                .into_struct_value();
+
+            // Check if this parameter is captured
+            let is_captured = self.captures.captured_vars.contains(&CapturedVar {
+                var_name: param_name.clone(),
+                declaring_function: fn_name.clone(),
+            });
+
+            let storage = if is_captured {
+                let cell = self
+                    .builder
+                    .build_call(self.runtime.lox_alloc_cell, &[param_val.into()], "cell")
+                    .expect("call lox_alloc_cell")
+                    .try_as_basic_value()
+                    .unwrap_basic()
+                    .into_pointer_value();
+                VarStorage::Cell(cell)
+            } else {
+                let alloca = self.create_entry_block_alloca(param_name);
+                self.builder
+                    .build_store(alloca, param_val)
+                    .expect("store param to alloca");
+                VarStorage::Alloca(alloca)
+            };
+
+            self.scopes
+                .last_mut()
+                .expect("have scope")
+                .insert(param_name.clone(), storage);
+        }
+
+        // Compile the function body
+        for decl in &function.body {
+            self.compile_decl(decl)?;
+        }
+
+        // Branch to exit block (if the body didn't already terminate)
+        if self
+            .builder
+            .get_insert_block()
+            .expect("have insert block")
+            .get_terminator()
+            .is_none()
+        {
+            self.builder
+                .build_unconditional_branch(exit_bb)
+                .expect("branch to exit");
+        }
+
+        // Exit block: load return value and return it
+        self.builder.position_at_end(exit_bb);
+        let ret_val = self
+            .builder
+            .build_load(self.lox_value.llvm_type(), ret_alloca, "retval")
+            .expect("load return value");
+        self.builder
+            .build_return(Some(&ret_val))
+            .expect("build return");
+
+        self.end_scope();
+
+        // Restore compilation state
+        self.current_fn = saved_fn;
+        self.current_lox_fn = saved_lox_fn;
+        self.scopes = saved_scopes;
+        self.return_target = saved_return_target;
+        if let Some(bb) = saved_insert_block {
+            self.builder.position_at_end(bb);
+        }
+
+        // Build the closure struct and store as a function value
+        // Collect cell pointers for the environment
+        let closure_val = self.build_closure(llvm_fn, fn_name, &captured_names)?;
+
+        // Store function as a global (or local if in a scope)
+        if self.scopes.is_empty() {
+            self.emit_global_set(fn_name, closure_val);
+        } else {
+            // Check if function name is captured
+            let is_captured = self.captures.captured_vars.contains(&CapturedVar {
+                var_name: fn_name.clone(),
+                declaring_function: self.current_lox_fn.clone(),
+            });
+            let storage = if is_captured {
+                let cell = self
+                    .builder
+                    .build_call(
+                        self.runtime.lox_alloc_cell,
+                        &[closure_val.into()],
+                        "fn_cell",
+                    )
+                    .expect("call lox_alloc_cell")
+                    .try_as_basic_value()
+                    .unwrap_basic()
+                    .into_pointer_value();
+                VarStorage::Cell(cell)
+            } else {
+                let alloca = self.create_entry_block_alloca(fn_name);
+                self.builder
+                    .build_store(alloca, closure_val)
+                    .expect("store function to alloca");
+                VarStorage::Alloca(alloca)
+            };
+            self.scopes
+                .last_mut()
+                .expect("have scope")
+                .insert(fn_name.clone(), storage);
+        }
+
+        Ok(())
+    }
+
+    /// Build a closure LoxValue from an LLVM function, its name, and its captured variable names.
+    fn build_closure(
+        &mut self,
+        llvm_fn: FunctionValue<'ctx>,
+        name: &str,
+        captured_names: &[String],
+    ) -> anyhow::Result<StructValue<'ctx>> {
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        let i32_type = self.context.i32_type();
+
+        let fn_ptr = llvm_fn.as_global_value().as_pointer_value();
+        let arity = i32_type.const_int(
+            (llvm_fn.count_params() - 1) as u64, // subtract env param
+            false,
+        );
+        let name_str = self
+            .builder
+            .build_global_string_ptr(name, "fn_name")
+            .expect("build fn name string");
+
+        let (env_ptr, env_count) = if captured_names.is_empty() {
+            (ptr_type.const_null(), i32_type.const_zero())
+        } else {
+            // Build an array of cell pointers on the stack and pass to lox_alloc_closure
+            let arr_alloca = self
+                .builder
+                .build_array_alloca(
+                    ptr_type,
+                    i32_type.const_int(captured_names.len() as u64, false),
+                    "env_arr",
+                )
+                .expect("alloca for env array");
+
+            for (i, cap_name) in captured_names.iter().enumerate() {
+                // Find the cell pointer for this captured variable in current scopes
+                let cell_ptr = self.find_cell_for_capture(cap_name);
+                let slot = unsafe {
+                    self.builder
+                        .build_gep(
+                            ptr_type,
+                            arr_alloca,
+                            &[self.context.i64_type().const_int(i as u64, false)],
+                            &format!("env_slot_{i}"),
+                        )
+                        .expect("GEP into env array")
+                };
+                self.builder
+                    .build_store(slot, cell_ptr)
+                    .expect("store cell ptr into env array");
+            }
+
+            (
+                arr_alloca,
+                i32_type.const_int(captured_names.len() as u64, false),
+            )
+        };
+
+        let closure_ptr = self
+            .builder
+            .build_call(
+                self.runtime.lox_alloc_closure,
+                &[
+                    fn_ptr.into(),
+                    arity.into(),
+                    name_str.as_pointer_value().into(),
+                    env_ptr.into(),
+                    env_count.into(),
+                ],
+                "closure",
+            )
+            .expect("call lox_alloc_closure")
+            .try_as_basic_value()
+            .unwrap_basic()
+            .into_pointer_value();
+
+        // Wrap closure pointer as a TAG_FUNCTION LoxValue
+        let closure_as_int = self
+            .builder
+            .build_ptr_to_int(closure_ptr, self.context.i64_type(), "closure_int")
+            .expect("ptr to int for closure");
+        Ok(self.lox_value.build_tagged_value_with_int(
+            &self.builder,
+            super::types::TAG_FUNCTION,
+            closure_as_int,
+        ))
+    }
+
+    /// Find the cell pointer for a captured variable by searching current scopes.
+    fn find_cell_for_capture(&self, name: &str) -> PointerValue<'ctx> {
+        for scope in self.scopes.iter().rev() {
+            if let Some(storage) = scope.get(name) {
+                return match storage {
+                    VarStorage::Cell(cell) => *cell,
+                    VarStorage::Alloca(_) => {
+                        panic!("captured variable '{name}' should be in a cell, not an alloca")
+                    }
+                };
+            }
+        }
+        panic!("captured variable '{name}' not found in any scope")
+    }
+
+    fn compile_call(&mut self, call: &CallExpr) -> anyhow::Result<StructValue<'ctx>> {
+        let callee = self.compile_expr(&call.callee)?;
+
+        // Extract closure pointer from the LoxValue
+        let closure_ptr_int = self.lox_value.extract_payload(&self.builder, callee);
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        let closure_ptr = self
+            .builder
+            .build_int_to_ptr(closure_ptr_int, ptr_type, "closure_ptr")
+            .expect("int to closure ptr");
+
+        // Load fn_ptr from closure struct (field 0)
+        let fn_ptr_ptr = self
+            .builder
+            .build_struct_gep(self.closure_llvm_type(), closure_ptr, 0, "fn_ptr_ptr")
+            .expect("GEP to fn_ptr");
+        let fn_ptr = self
+            .builder
+            .build_load(ptr_type, fn_ptr_ptr, "fn_ptr")
+            .expect("load fn_ptr")
+            .into_pointer_value();
+
+        // Load env from closure struct (field 3 = env pointer)
+        let env_ptr_ptr = self
+            .builder
+            .build_struct_gep(self.closure_llvm_type(), closure_ptr, 3, "env_ptr_ptr")
+            .expect("GEP to env_ptr");
+        let env_ptr = self
+            .builder
+            .build_load(ptr_type, env_ptr_ptr, "env_ptr")
+            .expect("load env_ptr")
+            .into_pointer_value();
+
+        // Build arguments: env + lox args
+        let mut args: Vec<BasicMetadataValueEnum> = vec![env_ptr.into()];
+        for arg in &call.arguments {
+            let val = self.compile_expr(arg)?;
+            args.push(val.into());
+        }
+
+        // Build the function type for the indirect call
+        let lv_type = self.lox_value.llvm_type();
+        let mut param_types: Vec<inkwell::types::BasicMetadataTypeEnum> = vec![ptr_type.into()];
+        for _ in &call.arguments {
+            param_types.push(lv_type.into());
+        }
+        let call_fn_type = lv_type.fn_type(&param_types, false);
+
+        let result = self
+            .builder
+            .build_indirect_call(call_fn_type, fn_ptr, &args, "call_result")
+            .expect("build indirect call")
+            .try_as_basic_value()
+            .unwrap_basic()
+            .into_struct_value();
+
+        Ok(result)
+    }
+
+    fn compile_return(&mut self, ret: &ReturnStmt) -> anyhow::Result<()> {
+        let value = match &ret.value {
+            Some(expr) => self.compile_expr(expr)?,
+            None => self.lox_value.build_nil(&self.builder),
+        };
+
+        let (ret_alloca, exit_bb) = self
+            .return_target
+            .expect("return must be inside a function");
+
+        self.builder
+            .build_store(ret_alloca, value)
+            .expect("store return value");
+        self.builder
+            .build_unconditional_branch(exit_bb)
+            .expect("branch to exit block");
+
+        // Create a dead block for any code after return (LLVM requires
+        // all instructions to be in a block)
+        let current_fn = self.current_fn.expect("inside a function");
+        let dead_bb = self.context.append_basic_block(current_fn, "after_ret");
+        self.builder.position_at_end(dead_bb);
+
+        Ok(())
+    }
+
+    /// Return the LLVM struct type matching the C LoxClosure struct layout.
+    fn closure_llvm_type(&self) -> inkwell::types::StructType<'ctx> {
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        let i32_type = self.context.i32_type();
+        // { void*, i32, i32, LoxValue**, char* }
+        // = { fn_ptr, arity, env_count, env, name }
+        self.context.struct_type(
+            &[
+                ptr_type.into(), // fn_ptr
+                i32_type.into(), // arity
+                i32_type.into(), // env_count
+                ptr_type.into(), // env (LoxValue**)
+                ptr_type.into(), // name (char*)
+            ],
+            false,
+        )
     }
 
     fn compile_if(&mut self, if_stmt: &IfStmt) -> anyhow::Result<()> {
@@ -237,9 +721,7 @@ impl<'ctx> CodeGen<'ctx> {
             Expr::Variable(var) => self.compile_variable(var),
             Expr::Assign(assign) => self.compile_assign(assign),
             Expr::Logical(logical) => self.compile_logical(logical),
-            Expr::Call(_) => {
-                anyhow::bail!("call expressions not yet supported in LLVM codegen")
-            }
+            Expr::Call(call) => self.compile_call(call),
             Expr::Get(_) => {
                 anyhow::bail!("get expressions not yet supported in LLVM codegen")
             }
@@ -493,13 +975,14 @@ impl<'ctx> CodeGen<'ctx> {
     }
 
     fn compile_variable(&mut self, var: &VariableExpr) -> anyhow::Result<StructValue<'ctx>> {
-        if let Some(&depth) = self.locals.get(&var.id) {
-            let alloca = self.resolve_local(&var.name, depth);
-            let loaded = self
-                .builder
-                .build_load(self.lox_value.llvm_type(), alloca, &var.name)
-                .expect("load local variable");
-            Ok(loaded.into_struct_value())
+        if self.locals.contains_key(&var.id) {
+            if let Some(storage) = self.find_local(&var.name) {
+                Ok(self.load_var_storage(&storage, &var.name))
+            } else {
+                // Resolved as local by resolver but not found in our scopes —
+                // this can happen for globals referenced inside functions
+                Ok(self.emit_global_get(&var.name))
+            }
         } else {
             Ok(self.emit_global_get(&var.name))
         }
@@ -507,11 +990,12 @@ impl<'ctx> CodeGen<'ctx> {
 
     fn compile_assign(&mut self, assign: &AssignExpr) -> anyhow::Result<StructValue<'ctx>> {
         let value = self.compile_expr(&assign.value)?;
-        if let Some(&depth) = self.locals.get(&assign.id) {
-            let alloca = self.resolve_local(&assign.name, depth);
-            self.builder
-                .build_store(alloca, value)
-                .expect("store to local variable");
+        if self.locals.contains_key(&assign.id) {
+            if let Some(storage) = self.find_local(&assign.name) {
+                self.store_var_storage(&storage, value);
+            } else {
+                self.emit_global_set(&assign.name, value);
+            }
         } else {
             self.emit_global_set(&assign.name, value);
         }
@@ -528,13 +1012,53 @@ impl<'ctx> CodeGen<'ctx> {
         self.scopes.pop();
     }
 
-    /// Look up a local variable by name at the given scope depth.
-    /// Depth 0 means the innermost (current) scope, 1 means one level out, etc.
-    fn resolve_local(&self, name: &str, depth: usize) -> PointerValue<'ctx> {
-        let scope_index = self.scopes.len() - 1 - depth;
-        *self.scopes[scope_index]
-            .get(name)
-            .unwrap_or_else(|| panic!("local variable '{name}' not found at depth {depth}"))
+    /// Search for a local variable by name in the scope stack (innermost first).
+    /// Returns None if not found in any scope.
+    fn find_local(&self, name: &str) -> Option<VarStorage<'ctx>> {
+        for scope in self.scopes.iter().rev() {
+            if let Some(storage) = scope.get(name) {
+                return Some(storage.clone());
+            }
+        }
+        None
+    }
+
+    /// Load a LoxValue from variable storage.
+    fn load_var_storage(&self, storage: &VarStorage<'ctx>, name: &str) -> StructValue<'ctx> {
+        match storage {
+            VarStorage::Alloca(alloca) => self
+                .builder
+                .build_load(self.lox_value.llvm_type(), *alloca, name)
+                .expect("load from alloca")
+                .into_struct_value(),
+            VarStorage::Cell(cell) => self
+                .builder
+                .build_call(self.runtime.lox_cell_get, &[(*cell).into()], name)
+                .expect("call lox_cell_get")
+                .try_as_basic_value()
+                .unwrap_basic()
+                .into_struct_value(),
+        }
+    }
+
+    /// Store a LoxValue to variable storage.
+    fn store_var_storage(&self, storage: &VarStorage<'ctx>, value: StructValue<'ctx>) {
+        match storage {
+            VarStorage::Alloca(alloca) => {
+                self.builder
+                    .build_store(*alloca, value)
+                    .expect("store to alloca");
+            }
+            VarStorage::Cell(cell) => {
+                self.builder
+                    .build_call(
+                        self.runtime.lox_cell_set,
+                        &[(*cell).into(), value.into()],
+                        "",
+                    )
+                    .expect("call lox_cell_set");
+            }
+        }
     }
 
     /// Create an alloca in the entry block of the current function.
@@ -617,8 +1141,9 @@ mod tests {
         let tokens = scanner::scan(source).expect("scan succeeds");
         let program = Parser::new(tokens).parse().expect("parse succeeds");
         let locals = Resolver::new().resolve(&program).expect("resolve succeeds");
+        let captures = super::super::capture::analyze_captures(&program);
         let context = Context::create();
-        let codegen = CodeGen::new(&context, "test", locals);
+        let codegen = CodeGen::new(&context, "test", locals, captures);
         codegen.compile(&program).expect("compile succeeds")
     }
 
@@ -817,13 +1342,14 @@ mod tests {
     #[test]
     fn local_var() {
         let ir = compile_to_ir("{ var x = 1; print x; }");
-        // Local var should use alloca+store+load, not global_set/global_get calls
+        // Local var should use alloca+store+load
         assert!(ir.contains("alloca"), "should use alloca for local var");
         assert!(ir.contains("store"), "should store to local var");
         assert!(ir.contains("load"), "should load from local var");
+        // Should not call lox_global_get for "x" (declaration is ok)
         assert!(
-            !ir.contains("call void @lox_global_set"),
-            "local var should not call global_set"
+            !ir.contains("call { i8, i64 } @lox_global_get"),
+            "local var should not call global_get"
         );
     }
 
@@ -859,15 +1385,15 @@ mod tests {
     #[test]
     fn local_var_assignment() {
         let ir = compile_to_ir("{ var x = 1; x = 2; print x; }");
-        // Assignment to local should use store, not global_set calls
+        // Assignment to local should use store, not global_get/set for "x"
         let store_count = ir.matches("store").count();
         assert!(
             store_count >= 2,
             "should have stores for init and assignment, got {store_count}"
         );
         assert!(
-            !ir.contains("call void @lox_global_set"),
-            "local assignment should not call global_set"
+            !ir.contains("call { i8, i64 } @lox_global_get"),
+            "local assignment should not call global_get"
         );
     }
 
@@ -884,5 +1410,78 @@ mod tests {
             "reading global from block calls global_get"
         );
         assert!(ir.contains("alloca"), "local var uses alloca");
+    }
+
+    // --- Phase 4: Functions and closures ---
+
+    #[test]
+    fn simple_function() {
+        let ir = compile_to_ir("fun f(x) { return x + 1; } print f(1);");
+        assert!(ir.contains("@lox_fn_f"), "should have lox_fn_f function");
+        assert!(
+            ir.contains("lox_alloc_closure"),
+            "should allocate a closure"
+        );
+    }
+
+    #[test]
+    fn function_call() {
+        let ir = compile_to_ir("fun greet() { print 42; } greet();");
+        assert!(ir.contains("@lox_fn_greet"), "should define greet fn");
+        // Call should be indirect (through closure)
+        assert!(ir.contains("call { i8, i64 }"), "should have call result");
+    }
+
+    #[test]
+    fn function_return() {
+        let ir = compile_to_ir("fun f() { return 42; }");
+        assert!(ir.contains("@lox_fn_f"), "should define f function");
+        assert!(
+            ir.contains("ret { i8, i64 }"),
+            "function should return LoxValue"
+        );
+    }
+
+    #[test]
+    fn implicit_nil_return() {
+        let ir = compile_to_ir("fun f() { print 1; }");
+        // Should still have a ret instruction (returning nil)
+        assert!(
+            ir.contains("ret { i8, i64 }"),
+            "function should return LoxValue (nil)"
+        );
+    }
+
+    #[test]
+    fn closure_capture() {
+        let ir = compile_to_ir(
+            "fun make() { var x = 1; fun get() { return x; } return get; } print make()();",
+        );
+        assert!(ir.contains("lox_alloc_cell"), "captured var needs a cell");
+        assert!(ir.contains("lox_cell_get"), "closure reads via cell_get");
+    }
+
+    #[test]
+    fn closure_mutation() {
+        let ir = compile_to_ir(
+            "fun counter() { var n = 0; fun inc() { n = n + 1; return n; } return inc; }",
+        );
+        assert!(ir.contains("lox_alloc_cell"), "captured var needs a cell");
+        assert!(ir.contains("lox_cell_set"), "closure writes via cell_set");
+    }
+
+    #[test]
+    fn recursion() {
+        let ir = compile_to_ir("fun fib(n) { if (n <= 1) return n; return fib(n-1) + fib(n-2); }");
+        assert!(ir.contains("@lox_fn_fib"), "should define fib function");
+    }
+
+    #[test]
+    fn native_clock() {
+        let ir = compile_to_ir("var t = clock();");
+        assert!(
+            ir.contains("lox_clock_wrapper"),
+            "should have clock wrapper"
+        );
     }
 }
