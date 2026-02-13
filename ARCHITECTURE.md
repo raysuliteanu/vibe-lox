@@ -3,16 +3,17 @@
 ## Overview
 
 **vibe-lox** is a Lox language interpreter and compiler implemented in Rust.
-It can directly interpret Lox source code, or compile and execute bytecode. An
-LLVM IR compilation mode is on the "roadmap".
+It can directly interpret Lox source code, compile and execute bytecode, or
+compile to LLVM IR for execution via `lli`.
 
 1. **Tree-walk Interpreter** - Direct AST interpretation of Lox source code (no
    compilation)
-1. **Stack-based VM** - execute bytecode Lox program, compiled with
+2. **Stack-based VM** - execute bytecode Lox program, compiled with
    --compile-bytecode
-1. **Bytecode Compiler** (`--compile-bytecode`) - Compile to custom Lox bytecode
+3. **Bytecode Compiler** (`--compile-bytecode`) - Compile to custom Lox bytecode
    for use with the VM
-1. **LLVM IR Compiler** (`--compile-llvm`) - Compile to LLVM IR (planned, not yet implemented)
+4. **LLVM IR Compiler** (`--compile-llvm`) - Compile to LLVM IR, run via `lli`
+   with the C runtime library
 
 The architecture follows a classic compiler pipeline with clear separation between phases:
 
@@ -22,6 +23,8 @@ Source Code → Tokenization → Parsing → AST → [Resolution] → Execution
                                          Interpreter
                                               ↓
                                        Bytecode Compiler → VM
+                                              ↓
+                                       LLVM IR Codegen → lli
 ```
 
 ---
@@ -41,14 +44,14 @@ Each compiler phase is isolated in its own module with clear interfaces. This al
 **Two-tier error handling:**
 
 - **Domain Errors** (`LoxError`): Rich, user-facing errors using `thiserror` + `miette`
-  - Carry source spans for precise error reporting
-  - Implement `miette::Diagnostic` for fancy terminal output with source snippets
-  - Variants: `ScanError`, `ParseError`, `ResolveError`, `RuntimeError`
+    - Carry source spans for precise error reporting
+    - Implement `miette::Diagnostic` for fancy terminal output with source snippets
+    - Variants: `ScanError`, `ParseError`, `ResolveError`, `RuntimeError`
 
 - **Propagation Wrapper** (`anyhow::Result`): Used throughout for error propagation
-  - All functions return `anyhow::Result<T>`
-  - Use `.context("while doing X")` before every `?` operator
-  - Provides error context chain for debugging
+    - All functions return `anyhow::Result<T>`
+    - Use `.context("while doing X")` before every `?` operator
+    - Provides error context chain for debugging
 
 **Example:**
 
@@ -71,7 +74,7 @@ The tokenizer and parser are shared across all execution backends:
 
 - Tree-walk interpreter operates directly on the AST
 - Bytecode VM compiles the AST to bytecode
-- LLVM compiler (planned) will also consume the AST
+- LLVM IR codegen compiles the AST to LLVM IR text files
 
 This ensures all backends handle the same language semantics.
 
@@ -96,11 +99,11 @@ Transform source code string into a stream of tokens with precise source locatio
 #### `src/scanner/token.rs`
 
 - **`TokenKind` enum:** 50+ token variants
-  - Literals: `Number(f64)`, `String(String)`, `True`, `False`, `Nil`
-  - Operators: `Plus`, `Minus`, `Star`, `Slash`, `Bang`, `Equal`, etc.
-  - Keywords: `And`, `Class`, `Fun`, `For`, `If`, `While`, `Return`, etc.
-  - Delimiters: `LeftParen`, `RightParen`, `LeftBrace`, etc.
-  - Special: `Eof`
+    - Literals: `Number(f64)`, `String(String)`, `True`, `False`, `Nil`
+    - Operators: `Plus`, `Minus`, `Star`, `Slash`, `Bang`, `Equal`, etc.
+    - Keywords: `And`, `Class`, `Fun`, `For`, `If`, `While`, `Return`, etc.
+    - Delimiters: `LeftParen`, `RightParen`, `LeftBrace`, etc.
+    - Special: `Eof`
 
 - **`Token` struct:**
 
@@ -125,29 +128,29 @@ Transform source code string into a stream of tokens with precise source locatio
 
 - **Implementation:** Uses `winnow` parser combinator library
 - **Key Functions:**
-  - `scan_all()` - Main entry point, collects all tokens
-  - `scan_token()` - Parse single token with error recovery
-  - `whitespace_and_comments()` - Skip whitespace and `//` comments
-  - `string_literal()` - Parse strings with escape sequences (`\n`, `\t`, `\\`, `\"`)
-  - `number_literal()` - Parse integers and decimals
-  - `identifier_or_keyword()` - Parse identifiers, match keywords
-  - `two_char_token()` - Parse `==`, `!=`, `<=`, `>=`
-  - `single_char_token()` - Parse single-char operators
+    - `scan_all()` - Main entry point, collects all tokens
+    - `scan_token()` - Parse single token with error recovery
+    - `whitespace_and_comments()` - Skip whitespace and `//` comments
+    - `string_literal()` - Parse strings with escape sequences (`\n`, `\t`, `\\`, `\"`)
+    - `number_literal()` - Parse integers and decimals
+    - `identifier_or_keyword()` - Parse identifiers, match keywords
+    - `two_char_token()` - Parse `==`, `!=`, `<=`, `>=`
+    - `single_char_token()` - Parse single-char operators
 
 ### Design Decisions
 
 1. **Tokens own lexemes:** Each `Token` owns its `String` lexeme rather than using string slices
-   - Simplifies lifetime management in later phases
-   - Allows tokens to outlive source string
+    - Simplifies lifetime management in later phases
+    - Allows tokens to outlive source string
 
 2. **winnow for parsing:** Parser combinator library instead of hand-written scanner
-   - Composable parsers
-   - Built-in span tracking with `Located<&str>`
-   - Clean error handling
+    - Composable parsers
+    - Built-in span tracking with `Located<&str>`
+    - Clean error handling
 
 3. **Error recovery:** Scanner collects all errors before returning
-   - Allows reporting multiple syntax errors at once
-   - Better user experience than stopping at first error
+    - Allows reporting multiple syntax errors at once
+    - Better user experience than stopping at first error
 
 ### Data Flow
 
@@ -244,10 +247,10 @@ pub enum LiteralValue {
 #### `src/ast/printer.rs`
 
 - **`to_sexp(program) -> String`**: S-expression format for debugging
-  - Example: `(binary (literal 1) + (literal 2))`
+    - Example: `(binary (literal 1) + (literal 2))`
 
 - **`to_json(program) -> String`**: JSON format via `serde_json`
-  - Machine-readable, includes all node details and spans
+    - Machine-readable, includes all node details and spans
 
 #### `src/parser/mod.rs`
 
@@ -287,14 +290,14 @@ impl Parser {
 ### Design Decisions
 
 1. **Recursive descent:** Hand-written parser following grammar structure
-   - Each grammar rule becomes a method
-   - Natural expression precedence via method call chain
-   - Easy to understand and debug
+    - Each grammar rule becomes a method
+    - Natural expression precedence via method call chain
+    - Easy to understand and debug
 
 2. **Error recovery:** Panic-mode synchronization
-   - On error, skip tokens until next statement boundary
-   - Collect all errors, continue parsing
-   - Returns all errors at end
+    - On error, skip tokens until next statement boundary
+    - Collect all errors, continue parsing
+    - Returns all errors at end
 
 3. **Desugar `for` to `while`:**
 
@@ -306,8 +309,8 @@ impl Parser {
    ```
 
 4. **Max 255 parameters/arguments:** Enforced during parsing
-   - Matches bytecode limit (single byte for count)
-   - Error reported with source span
+    - Matches bytecode limit (single byte for count)
+    - Error reported with source span
 
 ### Data Flow
 
@@ -596,7 +599,7 @@ impl LoxClass {
 
 impl LoxInstance {
     pub fn get(&self, name: &str, instance: &Rc<RefCell<LoxInstance>>)
-        -> Result<Value, LoxError> {
+               -> Result<Value, LoxError> {
         // Check fields first, then methods (bind `this`)
     }
 
@@ -627,9 +630,9 @@ Uses Rust's `Result` for control flow:
 Return(Value)  // Not really an error, used for unwinding
 
 // In function call:
-match self.call_function(...) {
-    Err(LoxError::Return(value)) => Ok(value),
-    other => other,
+match self .call_function(...) {
+Err(LoxError::Return(value)) => Ok(value),
+other => other,
 }
 ```
 
@@ -679,23 +682,53 @@ Bytecode representation.
 #[repr(u8)]
 pub enum OpCode {
     // Constants
-    Constant, Nil, True, False,
+    Constant,
+    Nil,
+    True,
+    False,
 
     // Stack operations
-    Pop, GetLocal, SetLocal, GetGlobal, SetGlobal, DefineGlobal,
-    GetUpvalue, SetUpvalue, GetProperty, SetProperty, GetSuper,
+    Pop,
+    GetLocal,
+    SetLocal,
+    GetGlobal,
+    SetGlobal,
+    DefineGlobal,
+    GetUpvalue,
+    SetUpvalue,
+    GetProperty,
+    SetProperty,
+    GetSuper,
 
     // Operators
-    Equal, Greater, Less, Add, Subtract, Multiply, Divide, Not, Negate,
+    Equal,
+    Greater,
+    Less,
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
+    Not,
+    Negate,
 
     // Control flow
-    Print, Jump, JumpIfFalse, Loop, Call, Invoke, SuperInvoke,
+    Print,
+    Jump,
+    JumpIfFalse,
+    Loop,
+    Call,
+    Invoke,
+    SuperInvoke,
 
     // Functions and closures
-    Closure, CloseUpvalue, Return,
+    Closure,
+    CloseUpvalue,
+    Return,
 
     // Classes
-    Class, Inherit, Method,
+    Class,
+    Inherit,
+    Method,
 }
 
 pub enum Constant {
@@ -798,28 +831,28 @@ impl Compiler {
 **Compilation Strategy:**
 
 1. **Variables:**
-   - Globals: Use `DefineGlobal`, `GetGlobal`, `SetGlobal` with constant pool index
-   - Locals: Use `GetLocal`, `SetLocal` with stack slot index
-   - Upvalues: Use `GetUpvalue`, `SetUpvalue` with upvalue index
+    - Globals: Use `DefineGlobal`, `GetGlobal`, `SetGlobal` with constant pool index
+    - Locals: Use `GetLocal`, `SetLocal` with stack slot index
+    - Upvalues: Use `GetUpvalue`, `SetUpvalue` with upvalue index
 
 2. **Control flow:**
-   - `if`: Compile condition, emit `JumpIfFalse` with placeholder, compile then-branch,
-     patch jump, compile else-branch
-   - `while`: Mark loop start, compile condition, emit `JumpIfFalse` to end,
-     compile body, emit `Loop` back to start
-   - Logical `and`/`or`: Short-circuit with conditional jumps
+    - `if`: Compile condition, emit `JumpIfFalse` with placeholder, compile then-branch,
+      patch jump, compile else-branch
+    - `while`: Mark loop start, compile condition, emit `JumpIfFalse` to end,
+      compile body, emit `Loop` back to start
+    - Logical `and`/`or`: Short-circuit with conditional jumps
 
 3. **Functions:**
-   - Push new `CompilerState` onto stack
-   - Compile parameters as locals
-   - Compile body
-   - Pop state, emit `Closure` instruction with upvalue info
-   - Nested functions access parent's upvalues
+    - Push new `CompilerState` onto stack
+    - Compile parameters as locals
+    - Compile body
+    - Pop state, emit `Closure` instruction with upvalue info
+    - Nested functions access parent's upvalues
 
 4. **Classes:**
-   - Emit `Class` instruction
-   - For each method: compile as function, emit `Method`
-   - For inheritance: emit `Inherit`, create `super` scope
+    - Emit `Class` instruction
+    - For each method: compile as function, emit `Method`
+    - For inheritance: emit `Inherit`, create `super` scope
 
 #### `src/vm/vm.rs`
 
@@ -969,6 +1002,105 @@ Bytecode Chunk
 VM (fetch-decode-execute loop)
     ↓
 Side effects + result
+```
+
+---
+
+## Phase 5: LLVM IR Compilation
+
+**Location:** `src/codegen/` and `runtime/`
+
+### Purpose
+
+Compile Lox AST to LLVM IR text files (`.ll`) that can be executed via `lli`
+or compiled to native code. Uses the `inkwell` crate (safe Rust bindings for
+LLVM 21).
+
+### Value Representation
+
+All Lox values are represented as a tagged union struct `{ i8, i64 }`:
+
+| Tag | Type     | Payload                              |
+|-----|----------|--------------------------------------|
+| 0   | nil      | unused (0)                           |
+| 1   | bool     | 0 or 1                               |
+| 2   | number   | f64 bitcast to i64                   |
+| 3   | string   | pointer to null-terminated C string  |
+| 4   | function | pointer to closure struct             |
+| 5   | class    | pointer to class descriptor          |
+| 6   | instance | pointer to instance struct           |
+
+### Key Modules
+
+#### `src/codegen/types.rs`
+
+- `LoxValueType`: Helper struct for building and extracting LoxValue structs
+- Tag constants: `TAG_NIL`, `TAG_BOOL`, `TAG_NUMBER`, `TAG_STRING`, etc.
+- Builder methods: `build_nil()`, `build_number()`, `build_bool()`, etc.
+- Extractor methods: `extract_tag()`, `extract_payload()`, `extract_number()`
+
+#### `src/codegen/capture.rs`
+
+- `CaptureInfo`: Pre-codegen AST pass identifying variables that cross function
+  boundaries and need heap-allocated cells
+- Handles classes with synthetic `__class_Name` scopes for `this`/`super`
+
+#### `src/codegen/runtime.rs`
+
+- `RuntimeDecls`: Declares all external C runtime functions in the LLVM module
+- Functions: `lox_print`, `lox_global_get`, `lox_global_set`,
+  `lox_value_truthy`, `lox_runtime_error`, `lox_alloc_closure`,
+  `lox_alloc_cell`, `lox_cell_get`, `lox_cell_set`, `lox_string_concat`,
+  `lox_string_equal`, `lox_alloc_class`, `lox_class_add_method`,
+  `lox_alloc_instance`, `lox_instance_get_property`, `lox_instance_set_field`,
+  `lox_class_find_method`, `lox_bind_method`, `lox_clock`
+
+#### `src/codegen/compiler.rs`
+
+- `CodeGen`: Main code generator struct wrapping inkwell Context/Module/Builder
+- `compile(program) -> Result<String>`: Entry point, returns LLVM IR text
+- Full Lox language support: literals, arithmetic, comparisons, unary ops,
+  print, global/local variables, control flow, functions, closures, classes,
+  inheritance, `this`, `super`, runtime type checks with line numbers
+
+#### `runtime/lox_runtime.c`
+
+- C runtime library loaded via `lli -load`
+- Implements: printing, global variable hash map, truthiness, error reporting,
+  closure allocation, heap cells for captured variables, string concatenation
+  and equality, class/instance allocation, field get/set, method lookup
+  (walks superclass chain), method binding, `clock()` native function
+- Number formatting matches Lox semantics (integers without `.0`)
+
+### Feature Coverage
+
+The LLVM codegen supports the full Lox language: literals, arithmetic, string
+operations, control flow (`if`/`else`, `while`, `for`, `and`/`or`), local and
+global variables with lexical scoping, functions, closures with captured
+variables, classes, inheritance, `this`, `super`, `init` constructors, and
+runtime error reporting with line numbers.
+
+### Running LLVM Output
+
+```bash
+# Build the runtime (once)
+make -C runtime
+
+# Compile and run
+cargo run -- --compile-llvm file.lox
+lli -load runtime/liblox_runtime.so file.ll
+```
+
+### Data Flow
+
+```plain
+AST
+    ↓
+CodeGen (AST walking, inkwell API)
+    ↓
+LLVM IR text (.ll file)
+    ↓
+lli + liblox_runtime.so → execution
 ```
 
 ---
@@ -1148,7 +1280,7 @@ Both backends produce frames in innermost-first order (most recent call at index
 ### When to Use Each Error Type
 
 | Situation           | Error Type              | Has Source Context? | Shows Line Number?          |
-| ------------------- | ----------------------- | ------------------- | --------------------------- |
+|---------------------|-------------------------|---------------------|-----------------------------|
 | Lexical error       | `CompileError::Scan`    | Yes (miette)        | Yes (miette)                |
 | Syntax error        | `CompileError::Parse`   | Yes (miette)        | Yes (miette)                |
 | Semantic error      | `CompileError::Resolve` | Yes (miette)        | Yes (miette)                |
@@ -1197,7 +1329,7 @@ Error: line 3: operands must be numbers
 ```rust
 // Requires offset and length from span
 CompileError::parse("expected ';'", token.span.offset, token.span.len)
-    .with_source_code(filename, source_code)
+.with_source_code(filename, source_code)
 ```
 
 **Creating runtime errors:**
@@ -1218,15 +1350,15 @@ RuntimeError::Return { value }
 ```rust
 // Compile errors (main.rs):
 for error in errors {
-    let error_with_src = error.with_source_code(filename, source);
-    eprintln!("{:?}", miette::Report::new(error_with_src));
+let error_with_src = error.with_source_code(filename, source);
+eprintln ! ("{:?}", miette::Report::new(error_with_src));
 }
 
 // Runtime errors (main.rs):
 if let Some(source) = source_code {
-    eprintln!("{}", error.display_with_line(source));  // Interpreter
+eprintln!("{}", error.display_with_line(source));  // Interpreter
 } else {
-    eprintln!("{}", error);  // VM
+eprintln ! ("{}", error);  // VM
 }
 ```
 
@@ -1260,18 +1392,30 @@ src/
 │   ├── environment.rs  # Variable scoping
 │   └── resolver.rs     # Phase 3A: Static resolution
 │
-└── vm/                  # Phase 4: Bytecode VM
-    ├── mod.rs          # Public API
-    ├── chunk.rs        # OpCode, Constant, Chunk
-    ├── compiler.rs     # AST → bytecode compiler
-    └── vm.rs           # Stack-based VM execution
+├── vm/                  # Phase 4: Bytecode VM
+│   ├── mod.rs          # Public API
+│   ├── chunk.rs        # OpCode, Constant, Chunk
+│   ├── compiler.rs     # AST → bytecode compiler
+│   └── vm.rs           # Stack-based VM execution
+│
+└── codegen/             # Phase 5: LLVM IR compilation
+    ├── mod.rs          # Public compile() API
+    ├── compiler.rs     # CodeGen struct, AST → LLVM IR
+    ├── capture.rs      # Capture analysis (variables crossing function boundaries)
+    ├── types.rs        # LoxValue type ({i8, i64} tagged union)
+    └── runtime.rs      # External runtime function declarations
+
+runtime/                 # C runtime for LLVM-compiled programs
+├── lox_runtime.c       # print, globals, truthiness, closures, strings, classes
+├── lox_runtime.h       # Header with LoxValue struct and tag constants
+└── Makefile            # Build liblox_runtime.so
 ```
 
 ---
 
 ## Testing Strategy
 
-### Unit Tests (257 tests)
+### Unit Tests (294 tests)
 
 **By module:**
 
@@ -1284,7 +1428,8 @@ src/
 - `vm/chunk.rs` (30 tests): Bytecode operations, serialization
 - `vm/compiler.rs` (50 tests): Compilation correctness
 - `vm/vm.rs` (70 tests): VM execution, all opcodes
-- `error.rs` (3 tests): Error trait implementations
+- `codegen/compiler.rs` (52 tests): LLVM IR generation, type checks
+- `error.rs` (14 tests): Error trait implementations
 - `repl.rs` (1 test): Bare expression detection
 
 **Test helpers:**
@@ -1296,23 +1441,28 @@ fn run_vm(source: &str) -> Vec<String>
 fn resolve(source: &str) -> Result<HashMap<ExprId, usize>, Vec<LoxError>>
 ```
 
-### Integration Tests (14 tests)
+### Integration Tests (34 tests)
 
 **Fixture-based testing:**
 
 ```
 tests/
-├── interpreter_tests.rs    # Tree-walk interpreter
-└── vm_tests.rs             # Bytecode VM
+├── interpreter_tests.rs    # Tree-walk interpreter (9 tests)
+├── vm_tests.rs             # Bytecode VM (12 tests)
+└── llvm_tests.rs           # LLVM IR codegen (13 tests)
 
 fixtures/
 ├── hello.lox               # Hello world
 ├── arithmetic.lox          # Math operations
-├── scoping.lox            # Variable scoping
-├── classes.lox            # OOP features
-├── counter.lox            # Closures
-├── fibonacci.lox          # Recursion
-└── *.expected             # Expected output files
+├── scoping.lox             # Variable scoping
+├── control_flow.lox        # If/else, while, for, logical operators
+├── classes.lox             # OOP features
+├── counter.lox             # Closures
+├── fib.lox                 # Recursion
+├── strings.lox             # String operations
+├── error_*.lox             # Runtime error test cases
+├── *.expected              # Expected stdout for success fixtures
+└── *.expected_error        # Expected stderr for error fixtures
 ```
 
 **Test execution:**
@@ -1331,7 +1481,7 @@ fn fixture_fibonacci() {
 ### Test Coverage
 
 | Component      | Coverage |
-| -------------- | -------- |
+|----------------|----------|
 | Scanner        | ~95%     |
 | Parser         | ~90%     |
 | Resolver       | ~95%     |
@@ -1380,6 +1530,7 @@ winnow = "0.7"          # Parser combinators
 serde = "1.0"           # Serialization
 serde_json = "1.0"      # JSON AST output
 rmp-serde = "1.3"       # MessagePack bytecode serialization
+inkwell = "0.8"         # LLVM 21 bindings (feature: llvm21-1)
 ```
 
 ### Dev Dependencies
@@ -1388,43 +1539,22 @@ rmp-serde = "1.3"       # MessagePack bytecode serialization
 rstest = "0.26"         # Parameterized testing
 ```
 
-### Future Dependencies
-
-```toml
-inkwell = "0.x"         # LLVM bindings (Phase 7)
-```
-
 ---
 
 ## Future Work
-
-### Planned Features (Phase 7)
-
-**LLVM IR Compilation:**
-
-- Emit LLVM IR using `inkwell` crate
-- Compile to native code via LLVM backend
-- Support for:
-  - Arithmetic and basic operations
-  - Functions (no closures initially)
-  - Type-specific optimizations
-
-**Challenges:**
-
-- Representing Lox's dynamic types in LLVM
-- Implementing garbage collection
-- Closure conversion for nested functions
-- Runtime support library for string operations
 
 ### Potential Improvements
 
 1. **Constant pool optimization:** Deduplicate constants
 2. **Jump optimization:** Use 8-bit jumps for short distances
 3. **Invoke optimization:** Extend to more property access patterns
-4. **Better line tracking:** Keep source text for error messages
-5. ~~**Bytecode format:** Binary format instead of JSON~~ (done — uses MessagePack with magic header)
+4. ~~**Bytecode format:** Binary format instead of JSON~~ (done — uses MessagePack with magic header)
+5. ~~**LLVM IR compilation**~~ (done — full Lox language support via `inkwell`)
 6. **REPL improvements:** Multi-line input, syntax highlighting
 7. **Debugger:** Step through bytecode, inspect stack
+8. **LLVM native compilation:** Compile `.ll` to native binary via `clang`
+9. **Garbage collection:** The C runtime currently leaks all heap allocations
+10. **Stack overflow detection:** No depth counter for deep recursion
 
 ---
 

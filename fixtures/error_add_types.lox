@@ -1,0 +1,2 @@
+// Test type error on invalid + operands
+print 1 + true;

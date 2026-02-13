@@ -1,0 +1,45 @@
+// if/else
+var x = 10;
+if (x > 5) print "big"; else print "small";
+if (x < 5) print "tiny"; else print "not tiny";
+
+// while loop
+var i = 0;
+while (i < 5) {
+  print i;
+  i = i + 1;
+}
+
+// for loop (desugared to while by parser)
+for (var j = 100; j < 103; j = j + 1) {
+  print j;
+}
+
+// logical operators with short-circuit
+print true and false;
+print true and true;
+print false or true;
+print false or false;
+print nil or "fallback";
+print "first" and "second";
+
+// nested if
+if (x > 5) {
+  if (x > 20) {
+    print "very big";
+  } else {
+    print "medium";
+  }
+} else {
+  print "small";
+}
+
+// while with complex condition
+var a = 1;
+var b = 10;
+while (a < 5 and b > 0) {
+  a = a + 1;
+  b = b - 2;
+}
+print a;
+print b;

@@ -1,0 +1,3 @@
+// Test property access on a non-instance
+var x = "hello";
+print x.length;

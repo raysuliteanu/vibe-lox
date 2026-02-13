@@ -1,0 +1,13 @@
+// String operations
+print "Hello, " + "world!";
+print "foo" + "bar" + "baz";
+
+// String equality
+print "abc" == "abc";
+print "abc" == "def";
+print "abc" != "def";
+
+// Mixed equality (string vs non-string)
+print "abc" == nil;
+print "abc" == 123;
+print nil == "abc";
