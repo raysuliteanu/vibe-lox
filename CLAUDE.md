@@ -15,7 +15,9 @@ cargo fmt --check              # Check formatting
 cargo fmt                      # Fix formatting
 cargo run -- <file.lox>        # Interpret a Lox file (tree-walk, default)
 cargo run -- <file.blox>       # Autodetect bytecode and run via VM
-cargo run -- --compile-llvm <file>    # Emit LLVM IR (not yet implemented)
+cargo run -- --compile-llvm <file.lox> # Compile to LLVM IR (.ll file)
+lli -load runtime/liblox_runtime.so <file.ll>  # Run compiled LLVM IR
+make -C runtime                       # Build C runtime (required for lli)
 cargo run -- --dump-tokens <f> # Show tokens and stop
 cargo run -- --dump-ast <f>    # Show AST (S-expressions) and stop
 cargo run -- --compile-bytecode <file.lox>  # Compile and save bytecode to .blox
@@ -35,6 +37,7 @@ Pipeline: Source -> Scanner (winnow) -> Tokens -> Parser -> AST -> Interpreter/V
 - `src/vm/` -- Bytecode VM (alternative backend)
 - `src/codegen/` -- LLVM IR generation via `inkwell`
 - `src/error.rs` -- Error types (`thiserror` + `miette` diagnostics)
+- `runtime/` -- C runtime library for LLVM-compiled programs (build with `make -C runtime`)
 
 ## Key Crate Dependencies
 
@@ -45,7 +48,7 @@ Pipeline: Source -> Scanner (winnow) -> Tokens -> Parser -> AST -> Interpreter/V
 - `clap` (derive) for CLI argument parsing
 - `serde` / `serde_json` for JSON AST output
 - `rmp-serde` for binary bytecode serialization (MessagePack)
-- `inkwell` for LLVM IR generation (Phase 7)
+- `inkwell` (llvm21-1) for LLVM IR generation via `src/codegen/`
 
 ## Conventions
 

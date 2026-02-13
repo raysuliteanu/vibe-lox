@@ -238,7 +238,23 @@ fn main() -> Result<()> {
     }
 
     if cli.compile_llvm {
-        bail!("--compile-llvm not yet implemented");
+        let input_path = cli
+            .file
+            .as_ref()
+            .context("--compile-llvm requires an input file")?;
+        let output_path = input_path.with_extension("ll");
+        let source = read_source(&cli)?;
+        let filename = get_filename(&cli);
+        let tokens =
+            scanner::scan(&source).map_err(|e| report_compile_errors(e, &filename, &source))?;
+        let program = LoxParser::new(tokens)
+            .parse()
+            .map_err(|e| report_compile_errors(e, &filename, &source))?;
+        let ir = vibe_lox::codegen::compile(&program).context("compile to LLVM IR")?;
+        std::fs::write(&output_path, &ir)
+            .with_context(|| format!("write LLVM IR to '{}'", output_path.display()))?;
+        println!("Wrote LLVM IR to {}", output_path.display());
+        return Ok(());
     }
 
     match cli.file {

@@ -973,6 +973,89 @@ Side effects + result
 
 ---
 
+## Phase 5: LLVM IR Compilation
+
+**Location:** `src/codegen/` and `runtime/`
+
+### Purpose
+
+Compile Lox AST to LLVM IR text files (`.ll`) that can be executed via `lli`
+or compiled to native code. Uses the `inkwell` crate (safe Rust bindings for
+LLVM 21).
+
+### Value Representation
+
+All Lox values are represented as a tagged union struct `{ i8, i64 }`:
+
+| Tag | Type     | Payload                                |
+| --- | -------- | -------------------------------------- |
+| 0   | nil      | unused (0)                             |
+| 1   | bool     | 0 or 1                                 |
+| 2   | number   | f64 bitcast to i64                     |
+| 3   | string   | pointer to null-terminated C string    |
+| 4   | function | pointer to closure struct (future)     |
+| 5   | class    | pointer to class descriptor (future)   |
+| 6   | instance | pointer to instance struct (future)    |
+
+### Key Modules
+
+#### `src/codegen/types.rs`
+
+- `LoxValueType`: Helper struct for building and extracting LoxValue structs
+- Tag constants: `TAG_NIL`, `TAG_BOOL`, `TAG_NUMBER`, `TAG_STRING`, etc.
+- Builder methods: `build_nil()`, `build_number()`, `build_bool()`, etc.
+- Extractor methods: `extract_tag()`, `extract_payload()`, `extract_number()`
+
+#### `src/codegen/runtime.rs`
+
+- `RuntimeDecls`: Declares external C runtime functions in the LLVM module
+- Functions: `lox_print`, `lox_global_get`, `lox_global_set`,
+  `lox_value_truthy`, `lox_runtime_error`
+
+#### `src/codegen/compiler.rs`
+
+- `CodeGen`: Main code generator struct wrapping inkwell Context/Module/Builder
+- `compile(program) -> Result<String>`: Entry point, returns LLVM IR text
+- Compiles: literals, arithmetic, comparisons, unary ops, print, global vars
+
+#### `runtime/lox_runtime.c`
+
+- C runtime library loaded via `lli -load`
+- Implements: printing, global variable hash map, truthiness, error reporting
+- Number formatting matches Lox semantics (integers without `.0`)
+
+### Current Scope (Phase 1)
+
+Supports: number/bool/nil/string literals, arithmetic (`+`, `-`, `*`, `/`),
+comparisons (`<`, `<=`, `>`, `>=`, `==`, `!=`), unary (`-`, `!`), `print`,
+global variables. Not yet: control flow, local variables, functions, closures,
+classes.
+
+### Running LLVM Output
+
+```bash
+# Build the runtime (once)
+make -C runtime
+
+# Compile and run
+cargo run -- --compile-llvm file.lox
+lli -load runtime/liblox_runtime.so file.ll
+```
+
+### Data Flow
+
+```plain
+AST
+    ↓
+CodeGen (AST walking, inkwell API)
+    ↓
+LLVM IR text (.ll file)
+    ↓
+lli + liblox_runtime.so → execution
+```
+
+---
+
 ## Error Handling Architecture
 
 ### Two-Tier Error System
@@ -1260,11 +1343,22 @@ src/
 │   ├── environment.rs  # Variable scoping
 │   └── resolver.rs     # Phase 3A: Static resolution
 │
-└── vm/                  # Phase 4: Bytecode VM
-    ├── mod.rs          # Public API
-    ├── chunk.rs        # OpCode, Constant, Chunk
-    ├── compiler.rs     # AST → bytecode compiler
-    └── vm.rs           # Stack-based VM execution
+├── vm/                  # Phase 4: Bytecode VM
+│   ├── mod.rs          # Public API
+│   ├── chunk.rs        # OpCode, Constant, Chunk
+│   ├── compiler.rs     # AST → bytecode compiler
+│   └── vm.rs           # Stack-based VM execution
+│
+└── codegen/             # Phase 5: LLVM IR compilation
+    ├── mod.rs          # Public compile() API
+    ├── compiler.rs     # CodeGen struct, AST → LLVM IR
+    ├── types.rs        # LoxValue type ({i8, i64} tagged union)
+    └── runtime.rs      # External runtime function declarations
+
+runtime/                 # C runtime for LLVM-compiled programs
+├── lox_runtime.c       # print, globals, truthiness, error handling
+├── lox_runtime.h       # Header with LoxValue struct and tag constants
+└── Makefile            # Build liblox_runtime.so
 ```
 
 ---
