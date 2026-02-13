@@ -19,6 +19,13 @@ pub struct RuntimeDecls<'ctx> {
     pub lox_cell_set: FunctionValue<'ctx>,
     pub lox_string_concat: FunctionValue<'ctx>,
     pub lox_string_equal: FunctionValue<'ctx>,
+    pub lox_alloc_class: FunctionValue<'ctx>,
+    pub lox_class_add_method: FunctionValue<'ctx>,
+    pub lox_alloc_instance: FunctionValue<'ctx>,
+    pub lox_instance_get_property: FunctionValue<'ctx>,
+    pub lox_instance_set_field: FunctionValue<'ctx>,
+    pub lox_class_find_method: FunctionValue<'ctx>,
+    pub lox_bind_method: FunctionValue<'ctx>,
     pub lox_clock: FunctionValue<'ctx>,
 }
 
@@ -91,6 +98,53 @@ impl<'ctx> RuntimeDecls<'ctx> {
         let lox_string_equal_ty = i1_type.fn_type(&[lv_type.into(), lv_type.into()], false);
         let lox_string_equal = module.add_function("lox_string_equal", lox_string_equal_ty, None);
 
+        // LoxClassDesc* lox_alloc_class(i8* name, ptr superclass, i32 method_count)
+        let lox_alloc_class_ty =
+            ptr_type.fn_type(&[ptr_type.into(), ptr_type.into(), i32_type.into()], false);
+        let lox_alloc_class = module.add_function("lox_alloc_class", lox_alloc_class_ty, None);
+
+        // void lox_class_add_method(ptr klass, i8* name, ptr closure)
+        let lox_class_add_method_ty =
+            void_type.fn_type(&[ptr_type.into(), ptr_type.into(), ptr_type.into()], false);
+        let lox_class_add_method =
+            module.add_function("lox_class_add_method", lox_class_add_method_ty, None);
+
+        // LoxValue lox_alloc_instance(ptr klass)
+        let lox_alloc_instance_ty = lv_type.fn_type(&[ptr_type.into()], false);
+        let lox_alloc_instance =
+            module.add_function("lox_alloc_instance", lox_alloc_instance_ty, None);
+
+        // LoxValue lox_instance_get_property(LoxValue instance, i8* name, i64 name_len)
+        let lox_instance_get_property_ty =
+            lv_type.fn_type(&[lv_type.into(), ptr_type.into(), i64_type.into()], false);
+        let lox_instance_get_property = module.add_function(
+            "lox_instance_get_property",
+            lox_instance_get_property_ty,
+            None,
+        );
+
+        // void lox_instance_set_field(LoxValue instance, i8* name, i64 name_len, LoxValue value)
+        let lox_instance_set_field_ty = void_type.fn_type(
+            &[
+                lv_type.into(),
+                ptr_type.into(),
+                i64_type.into(),
+                lv_type.into(),
+            ],
+            false,
+        );
+        let lox_instance_set_field =
+            module.add_function("lox_instance_set_field", lox_instance_set_field_ty, None);
+
+        // LoxClosure* lox_class_find_method(ptr klass, i8* name)
+        let lox_class_find_method_ty = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+        let lox_class_find_method =
+            module.add_function("lox_class_find_method", lox_class_find_method_ty, None);
+
+        // LoxValue lox_bind_method(LoxValue instance, ptr method_closure)
+        let lox_bind_method_ty = lv_type.fn_type(&[lv_type.into(), ptr_type.into()], false);
+        let lox_bind_method = module.add_function("lox_bind_method", lox_bind_method_ty, None);
+
         // LoxValue lox_clock(void)
         let lox_clock_ty = lv_type.fn_type(&[], false);
         let lox_clock = module.add_function("lox_clock", lox_clock_ty, None);
@@ -107,6 +161,13 @@ impl<'ctx> RuntimeDecls<'ctx> {
             lox_cell_set,
             lox_string_concat,
             lox_string_equal,
+            lox_alloc_class,
+            lox_class_add_method,
+            lox_alloc_instance,
+            lox_instance_get_property,
+            lox_instance_set_field,
+            lox_class_find_method,
+            lox_bind_method,
             lox_clock,
         }
     }

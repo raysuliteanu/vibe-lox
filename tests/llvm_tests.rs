@@ -100,3 +100,10 @@ fn llvm_fixture_strings() {
     let expected = include_str!("../fixtures/strings.expected");
     assert_eq!(output, expected);
 }
+
+#[test]
+fn llvm_fixture_classes() {
+    let output = run_llvm_fixture("classes.lox");
+    let expected = include_str!("../fixtures/classes.expected");
+    assert_eq!(output, expected);
+}

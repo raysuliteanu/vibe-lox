@@ -66,6 +66,16 @@ void lox_print(LoxValue value) {
     printf("<fn %s>\n", closure->name ? closure->name : "?");
     break;
   }
+  case TAG_CLASS: {
+    LoxClassDesc *klass = (LoxClassDesc *)(intptr_t)value.payload;
+    printf("%s\n", klass->name);
+    break;
+  }
+  case TAG_INSTANCE: {
+    LoxInstance *inst = (LoxInstance *)(intptr_t)value.payload;
+    printf("%s instance\n", inst->klass->name);
+    break;
+  }
   default:
     printf("<unknown value tag %d>\n", value.tag);
     break;
@@ -166,6 +176,117 @@ int8_t lox_string_equal(LoxValue a, LoxValue b) {
   const char *sa = (const char *)(intptr_t)a.payload;
   const char *sb = (const char *)(intptr_t)b.payload;
   return strcmp(sa, sb) == 0 ? 1 : 0;
+}
+
+LoxClassDesc *lox_alloc_class(const char *name, LoxClassDesc *superclass,
+                               int32_t method_count) {
+  LoxClassDesc *klass = malloc(sizeof(LoxClassDesc));
+  klass->name = name;
+  klass->superclass = superclass;
+  klass->method_count = 0;
+  klass->methods = malloc(sizeof(LoxMethodEntry) * (size_t)method_count);
+  return klass;
+}
+
+void lox_class_add_method(LoxClassDesc *klass, const char *name,
+                           LoxClosure *closure) {
+  klass->methods[klass->method_count].name = name;
+  klass->methods[klass->method_count].closure = closure;
+  klass->method_count++;
+}
+
+LoxValue lox_alloc_instance(LoxClassDesc *klass) {
+  LoxInstance *inst = malloc(sizeof(LoxInstance));
+  inst->klass = klass;
+  inst->field_count = 0;
+  LoxValue v;
+  v.tag = TAG_INSTANCE;
+  v.payload = (int64_t)(intptr_t)inst;
+  return v;
+}
+
+static LoxInstance *extract_instance(LoxValue value) {
+  return (LoxInstance *)(intptr_t)value.payload;
+}
+
+LoxClosure *lox_class_find_method(LoxClassDesc *klass, const char *name) {
+  for (LoxClassDesc *k = klass; k != NULL; k = k->superclass) {
+    for (int i = 0; i < k->method_count; i++) {
+      if (strcmp(k->methods[i].name, name) == 0) {
+        return k->methods[i].closure;
+      }
+    }
+  }
+  return NULL;
+}
+
+LoxValue lox_bind_method(LoxValue instance, LoxClosure *method) {
+  /* Create a new closure with env[0] = cell containing the instance. */
+  int new_env_count = method->env_count;
+  LoxClosure *bound = malloc(sizeof(LoxClosure));
+  bound->fn_ptr = method->fn_ptr;
+  bound->arity = method->arity;
+  bound->name = method->name;
+  bound->env_count = new_env_count;
+  bound->env = malloc(sizeof(LoxValue *) * (size_t)new_env_count);
+  if (method->env != NULL) {
+    memcpy(bound->env, method->env, sizeof(LoxValue *) * (size_t)new_env_count);
+  }
+  /* Replace env[0] with a new cell holding the instance. */
+  bound->env[0] = lox_alloc_cell(instance);
+  LoxValue v;
+  v.tag = TAG_FUNCTION;
+  v.payload = (int64_t)(intptr_t)bound;
+  return v;
+}
+
+LoxValue lox_instance_get_property(LoxValue instance, const char *name,
+                                    int64_t name_len) {
+  LoxInstance *inst = extract_instance(instance);
+  /* Check fields first. */
+  for (int i = 0; i < inst->field_count; i++) {
+    if ((int64_t)strlen(inst->fields[i].name) == name_len &&
+        memcmp(inst->fields[i].name, name, (size_t)name_len) == 0) {
+      return inst->fields[i].value;
+    }
+  }
+  /* Then check methods (with bind). */
+  /* We need a null-terminated copy for lox_class_find_method. */
+  char name_buf[128];
+  if (name_len >= (int64_t)sizeof(name_buf)) name_len = (int64_t)sizeof(name_buf) - 1;
+  memcpy(name_buf, name, (size_t)name_len);
+  name_buf[name_len] = '\0';
+  LoxClosure *method = lox_class_find_method(inst->klass, name_buf);
+  if (method != NULL) {
+    return lox_bind_method(instance, method);
+  }
+  fprintf(stderr, "Error: undefined property '%.*s'\n", (int)name_len, name);
+  exit(70);
+}
+
+void lox_instance_set_field(LoxValue instance, const char *name,
+                             int64_t name_len, LoxValue value) {
+  LoxInstance *inst = extract_instance(instance);
+  /* Update existing field if present. */
+  for (int i = 0; i < inst->field_count; i++) {
+    if ((int64_t)strlen(inst->fields[i].name) == name_len &&
+        memcmp(inst->fields[i].name, name, (size_t)name_len) == 0) {
+      inst->fields[i].value = value;
+      return;
+    }
+  }
+  /* Add new field. */
+  if (inst->field_count >= MAX_FIELDS) {
+    fprintf(stderr, "Error: too many fields on instance\n");
+    exit(70);
+  }
+  if (name_len >= (int64_t)sizeof(inst->fields[0].name)) {
+    name_len = (int64_t)sizeof(inst->fields[0].name) - 1;
+  }
+  memcpy(inst->fields[inst->field_count].name, name, (size_t)name_len);
+  inst->fields[inst->field_count].name[name_len] = '\0';
+  inst->fields[inst->field_count].value = value;
+  inst->field_count++;
 }
 
 LoxValue lox_clock(void) {

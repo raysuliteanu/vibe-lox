@@ -134,7 +134,10 @@ impl CaptureAnalyzer {
                 self.visit_function(&f.function);
             }
             Decl::Statement(s) => self.visit_stmt(s),
-            Decl::Class(_) => {} // Phase 6
+            Decl::Class(c) => {
+                self.declare_var(&c.name);
+                self.visit_class(c);
+            }
         }
     }
 
@@ -147,6 +150,31 @@ impl CaptureAnalyzer {
         for decl in &function.body {
             self.visit_decl(decl);
         }
+        self.function_scopes.pop();
+    }
+
+    fn visit_class(&mut self, class: &ClassDecl) {
+        // Reference the superclass variable if present
+        if let Some(ref superclass) = class.superclass {
+            self.reference_var(superclass);
+        }
+
+        // Push a synthetic scope for the class that provides "this" and "super".
+        // This mirrors the resolver's behavior. The scope name uses a prefix
+        // that can't collide with user-defined function names.
+        let class_scope_name = format!("__class_{}", class.name);
+        self.function_scopes
+            .push((class_scope_name, HashSet::new()));
+
+        if class.superclass.is_some() {
+            self.declare_var("super");
+        }
+        self.declare_var("this");
+
+        for method in &class.methods {
+            self.visit_function(method);
+        }
+
         self.function_scopes.pop();
     }
 

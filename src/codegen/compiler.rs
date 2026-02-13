@@ -9,9 +9,10 @@ use inkwell::values::{
 };
 
 use crate::ast::{
-    AssignExpr, BinaryExpr, BinaryOp, BlockStmt, CallExpr, Decl, Expr, ExprId, ExprStmt, FunDecl,
-    IfStmt, LiteralExpr, LiteralValue, LogicalExpr, LogicalOp, PrintStmt, Program, ReturnStmt,
-    Stmt, UnaryExpr, UnaryOp, VarDecl, VariableExpr, WhileStmt,
+    AssignExpr, BinaryExpr, BinaryOp, BlockStmt, CallExpr, ClassDecl, Decl, Expr, ExprId, ExprStmt,
+    FunDecl, GetExpr, IfStmt, LiteralExpr, LiteralValue, LogicalExpr, LogicalOp, PrintStmt,
+    Program, ReturnStmt, SetExpr, Stmt, SuperExpr, ThisExpr, UnaryExpr, UnaryOp, VarDecl,
+    VariableExpr, WhileStmt,
 };
 
 use super::capture::{CaptureInfo, CapturedVar};
@@ -150,9 +151,7 @@ impl<'ctx> CodeGen<'ctx> {
             Decl::Var(var_decl) => self.compile_var_decl(var_decl),
             Decl::Statement(stmt) => self.compile_stmt(stmt),
             Decl::Fun(fun_decl) => self.compile_fun_decl(fun_decl),
-            Decl::Class(_) => {
-                anyhow::bail!("class declarations not yet supported in LLVM codegen")
-            }
+            Decl::Class(class_decl) => self.compile_class_decl(class_decl),
         }
     }
 
@@ -428,6 +427,448 @@ impl<'ctx> CodeGen<'ctx> {
         Ok(())
     }
 
+    fn compile_class_decl(&mut self, class: &ClassDecl) -> anyhow::Result<()> {
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        let i32_type = self.context.i32_type();
+
+        // Resolve superclass pointer (or null)
+        let superclass_ptr = if let Some(ref superclass_name) = class.superclass {
+            // Load superclass LoxValue (TAG_CLASS), extract the class descriptor pointer
+            let super_val = if let Some(storage) = self.find_local(superclass_name) {
+                self.load_var_storage(&storage, superclass_name)
+            } else {
+                self.emit_global_get(superclass_name)
+            };
+            let super_payload = self.lox_value.extract_payload(&self.builder, super_val);
+            self.builder
+                .build_int_to_ptr(super_payload, ptr_type, "super_class_ptr")
+                .expect("superclass payload to ptr")
+        } else {
+            ptr_type.const_null()
+        };
+
+        // Allocate class descriptor
+        let method_count = i32_type.const_int(class.methods.len() as u64, false);
+        let class_name_str = self
+            .builder
+            .build_global_string_ptr(&class.name, "class_name")
+            .expect("class name string");
+        let class_desc = self
+            .builder
+            .build_call(
+                self.runtime.lox_alloc_class,
+                &[
+                    class_name_str.as_pointer_value().into(),
+                    superclass_ptr.into(),
+                    method_count.into(),
+                ],
+                "class_desc",
+            )
+            .expect("call lox_alloc_class")
+            .try_as_basic_value()
+            .unwrap_basic()
+            .into_pointer_value();
+
+        // Store class_desc pointer in a cell so methods of subclasses can capture "super"
+        let class_desc_as_int = self
+            .builder
+            .build_ptr_to_int(class_desc, self.context.i64_type(), "class_desc_int")
+            .expect("class desc to int");
+        let class_val = self.lox_value.build_tagged_value_with_int(
+            &self.builder,
+            super::types::TAG_CLASS,
+            class_desc_as_int,
+        );
+
+        // Compile each method
+        let has_super = class.superclass.is_some();
+        for method in &class.methods {
+            let closure_ptr = self.compile_method(
+                method,
+                &class.name,
+                has_super,
+                class_desc,
+                class_val,
+                class.superclass.as_deref(),
+            )?;
+
+            // Add method to class descriptor
+            let method_name_str = self
+                .builder
+                .build_global_string_ptr(&method.name, "method_name")
+                .expect("method name string");
+            self.builder
+                .build_call(
+                    self.runtime.lox_class_add_method,
+                    &[
+                        class_desc.into(),
+                        method_name_str.as_pointer_value().into(),
+                        closure_ptr.into(),
+                    ],
+                    "",
+                )
+                .expect("call lox_class_add_method");
+        }
+
+        // Store class as a global (or local if in a scope)
+        if self.scopes.is_empty() {
+            self.emit_global_set(&class.name, class_val);
+        } else {
+            let alloca = self.create_entry_block_alloca(&class.name);
+            self.builder
+                .build_store(alloca, class_val)
+                .expect("store class to alloca");
+            self.scopes
+                .last_mut()
+                .expect("have scope")
+                .insert(class.name.clone(), VarStorage::Alloca(alloca));
+        }
+
+        Ok(())
+    }
+
+    /// Compile a method as an LLVM function. Methods have `this` at env[0]
+    /// and optionally `super` at env[1] (for subclass methods).
+    /// Returns the closure pointer for the method.
+    fn compile_method(
+        &mut self,
+        method: &crate::ast::Function,
+        class_name: &str,
+        has_super: bool,
+        _class_desc: PointerValue<'ctx>,
+        _class_val: StructValue<'ctx>,
+        superclass_name: Option<&str>,
+    ) -> anyhow::Result<PointerValue<'ctx>> {
+        let method_name = &method.name;
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        let lv_type = self.lox_value.llvm_type();
+
+        // Determine captured variables from enclosing scopes (excluding this/super)
+        let captured_names = self
+            .captures
+            .function_captures
+            .get(method_name)
+            .cloned()
+            .unwrap_or_default();
+
+        // Method env layout: [this, super?, captured_var_0, ...]
+        let this_env_idx = 0usize;
+        let super_env_idx = if has_super { Some(1usize) } else { None };
+        let capture_offset = if has_super { 2 } else { 1 };
+        let total_env_count = capture_offset + captured_names.len();
+
+        // Build LLVM function type: (ptr env, LoxValue arg0, ...) -> LoxValue
+        let mut param_types: Vec<inkwell::types::BasicMetadataTypeEnum> = vec![ptr_type.into()];
+        for _ in &method.params {
+            param_types.push(lv_type.into());
+        }
+        let fn_type = lv_type.fn_type(&param_types, false);
+        let llvm_fn_name = format!("lox_fn_{class_name}_{method_name}");
+        let llvm_fn = self.module.add_function(&llvm_fn_name, fn_type, None);
+
+        // Save compilation state
+        let saved_fn = self.current_fn;
+        let saved_lox_fn = self.current_lox_fn.clone();
+        let saved_scopes = std::mem::take(&mut self.scopes);
+        let saved_return_target = self.return_target.take();
+        let saved_insert_block = self.builder.get_insert_block();
+
+        // Set up for method body
+        self.current_fn = Some(llvm_fn);
+        self.current_lox_fn = method_name.clone();
+
+        let entry_bb = self.context.append_basic_block(llvm_fn, "entry");
+        let exit_bb = self.context.append_basic_block(llvm_fn, "exit");
+        self.builder.position_at_end(entry_bb);
+
+        let ret_alloca = self.create_entry_block_alloca("retval");
+        self.builder
+            .build_store(ret_alloca, self.lox_value.build_nil(&self.builder))
+            .expect("store initial retval");
+        self.return_target = Some((ret_alloca, exit_bb));
+
+        self.begin_scope();
+
+        // Load env parameter
+        let env_param = llvm_fn
+            .get_nth_param(0)
+            .expect("env parameter exists")
+            .into_pointer_value();
+
+        // Load "this" from env[this_env_idx]
+        let this_cell_ptr_ptr = unsafe {
+            self.builder
+                .build_gep(
+                    ptr_type,
+                    env_param,
+                    &[self
+                        .context
+                        .i64_type()
+                        .const_int(this_env_idx as u64, false)],
+                    "env_this_ptr",
+                )
+                .expect("GEP for this in env")
+        };
+        let this_cell = self
+            .builder
+            .build_load(ptr_type, this_cell_ptr_ptr, "this_cell")
+            .expect("load this cell from env")
+            .into_pointer_value();
+        self.scopes
+            .last_mut()
+            .expect("have scope")
+            .insert("this".to_string(), VarStorage::Cell(this_cell));
+
+        // Load "super" from env if subclass method
+        if let Some(super_idx) = super_env_idx {
+            let super_cell_ptr_ptr = unsafe {
+                self.builder
+                    .build_gep(
+                        ptr_type,
+                        env_param,
+                        &[self.context.i64_type().const_int(super_idx as u64, false)],
+                        "env_super_ptr",
+                    )
+                    .expect("GEP for super in env")
+            };
+            let super_cell = self
+                .builder
+                .build_load(ptr_type, super_cell_ptr_ptr, "super_cell")
+                .expect("load super cell from env")
+                .into_pointer_value();
+            self.scopes
+                .last_mut()
+                .expect("have scope")
+                .insert("super".to_string(), VarStorage::Cell(super_cell));
+        }
+
+        // Load captured variables from env
+        for (i, cap_name) in captured_names.iter().enumerate() {
+            let env_idx = capture_offset + i;
+            let cell_ptr_ptr = unsafe {
+                self.builder
+                    .build_gep(
+                        ptr_type,
+                        env_param,
+                        &[self.context.i64_type().const_int(env_idx as u64, false)],
+                        &format!("env_{cap_name}_ptr"),
+                    )
+                    .expect("GEP into env for capture")
+            };
+            let cell_ptr = self
+                .builder
+                .build_load(ptr_type, cell_ptr_ptr, &format!("env_{cap_name}"))
+                .expect("load capture cell from env")
+                .into_pointer_value();
+            self.scopes
+                .last_mut()
+                .expect("have scope")
+                .insert(cap_name.clone(), VarStorage::Cell(cell_ptr));
+        }
+
+        // Bind parameters as local variables
+        for (i, param_name) in method.params.iter().enumerate() {
+            let param_val = llvm_fn
+                .get_nth_param((i + 1) as u32)
+                .expect("parameter exists")
+                .into_struct_value();
+
+            let is_captured = self.captures.captured_vars.contains(&CapturedVar {
+                var_name: param_name.clone(),
+                declaring_function: method_name.clone(),
+            });
+
+            let storage = if is_captured {
+                let cell = self
+                    .builder
+                    .build_call(self.runtime.lox_alloc_cell, &[param_val.into()], "cell")
+                    .expect("call lox_alloc_cell")
+                    .try_as_basic_value()
+                    .unwrap_basic()
+                    .into_pointer_value();
+                VarStorage::Cell(cell)
+            } else {
+                let alloca = self.create_entry_block_alloca(param_name);
+                self.builder
+                    .build_store(alloca, param_val)
+                    .expect("store param to alloca");
+                VarStorage::Alloca(alloca)
+            };
+
+            self.scopes
+                .last_mut()
+                .expect("have scope")
+                .insert(param_name.clone(), storage);
+        }
+
+        // Compile method body
+        for decl in &method.body {
+            self.compile_decl(decl)?;
+        }
+
+        // Branch to exit if body didn't terminate
+        if self
+            .builder
+            .get_insert_block()
+            .expect("have insert block")
+            .get_terminator()
+            .is_none()
+        {
+            // For init methods, implicit return is "this"
+            if method.name == "init" {
+                let this_val = self.load_var_storage(
+                    &self.find_local("this").expect("this in method scope"),
+                    "this",
+                );
+                self.builder
+                    .build_store(ret_alloca, this_val)
+                    .expect("store this as init return");
+            }
+            self.builder
+                .build_unconditional_branch(exit_bb)
+                .expect("branch to exit");
+        }
+
+        // Exit block
+        self.builder.position_at_end(exit_bb);
+        let ret_val = self
+            .builder
+            .build_load(self.lox_value.llvm_type(), ret_alloca, "retval")
+            .expect("load return value");
+
+        // For init methods, always return "this" regardless of what was stored
+        if method.name == "init" {
+            let this_val = self.load_var_storage(
+                &self.find_local("this").expect("this in method scope"),
+                "this_ret",
+            );
+            self.builder
+                .build_return(Some(&this_val))
+                .expect("return this from init");
+        } else {
+            self.builder
+                .build_return(Some(&ret_val))
+                .expect("build return");
+        }
+
+        self.end_scope();
+
+        // Restore state
+        self.current_fn = saved_fn;
+        self.current_lox_fn = saved_lox_fn;
+        self.scopes = saved_scopes;
+        self.return_target = saved_return_target;
+        if let Some(bb) = saved_insert_block {
+            self.builder.position_at_end(bb);
+        }
+
+        // Build the method closure with env: [this_cell, super_cell?, captures...]
+        // For "this": placeholder null cell (filled by lox_bind_method at call time)
+        let i32_type = self.context.i32_type();
+        let null_cell = ptr_type.const_null();
+
+        let arr_alloca = self
+            .builder
+            .build_array_alloca(
+                ptr_type,
+                i32_type.const_int(total_env_count as u64, false),
+                "method_env_arr",
+            )
+            .expect("alloca for method env array");
+
+        // env[0] = null (placeholder for this, filled by bind_method)
+        let slot0 = unsafe {
+            self.builder
+                .build_gep(
+                    ptr_type,
+                    arr_alloca,
+                    &[self.context.i64_type().const_int(0, false)],
+                    "env_slot_this",
+                )
+                .expect("GEP for this slot")
+        };
+        self.builder
+            .build_store(slot0, null_cell)
+            .expect("store null this cell");
+
+        // env[1] = super cell (if subclass)
+        if let Some(sc_name) = superclass_name {
+            let slot1 = unsafe {
+                self.builder
+                    .build_gep(
+                        ptr_type,
+                        arr_alloca,
+                        &[self.context.i64_type().const_int(1, false)],
+                        "env_slot_super",
+                    )
+                    .expect("GEP for super slot")
+            };
+
+            let super_val = self.emit_global_get(sc_name);
+            let super_cell = self
+                .builder
+                .build_call(
+                    self.runtime.lox_alloc_cell,
+                    &[super_val.into()],
+                    "super_cell",
+                )
+                .expect("alloc super cell")
+                .try_as_basic_value()
+                .unwrap_basic()
+                .into_pointer_value();
+            self.builder
+                .build_store(slot1, super_cell)
+                .expect("store super cell");
+        }
+
+        // env[capture_offset..] = captured variable cells
+        for (i, cap_name) in captured_names.iter().enumerate() {
+            let env_idx = capture_offset + i;
+            let cell_ptr = self.find_cell_for_capture(cap_name);
+            let slot = unsafe {
+                self.builder
+                    .build_gep(
+                        ptr_type,
+                        arr_alloca,
+                        &[self.context.i64_type().const_int(env_idx as u64, false)],
+                        &format!("env_slot_{env_idx}"),
+                    )
+                    .expect("GEP for capture slot")
+            };
+            self.builder
+                .build_store(slot, cell_ptr)
+                .expect("store capture cell in method env");
+        }
+
+        let fn_ptr = llvm_fn.as_global_value().as_pointer_value();
+        let arity = i32_type.const_int(method.params.len() as u64, false);
+        let name_str = self
+            .builder
+            .build_global_string_ptr(method_name, "method_fn_name")
+            .expect("method fn name string");
+        let env_count = i32_type.const_int(total_env_count as u64, false);
+
+        let closure_ptr = self
+            .builder
+            .build_call(
+                self.runtime.lox_alloc_closure,
+                &[
+                    fn_ptr.into(),
+                    arity.into(),
+                    name_str.as_pointer_value().into(),
+                    arr_alloca.into(),
+                    env_count.into(),
+                ],
+                "method_closure",
+            )
+            .expect("call lox_alloc_closure for method")
+            .try_as_basic_value()
+            .unwrap_basic()
+            .into_pointer_value();
+
+        Ok(closure_ptr)
+    }
+
     /// Build a closure LoxValue from an LLVM function, its name, and its captured variable names.
     fn build_closure(
         &mut self,
@@ -531,17 +972,76 @@ impl<'ctx> CodeGen<'ctx> {
     }
 
     fn compile_call(&mut self, call: &CallExpr) -> anyhow::Result<StructValue<'ctx>> {
+        let current_fn = self.current_fn.expect("must be inside a function");
         let callee = self.compile_expr(&call.callee)?;
+        let lv_type = self.lox_value.llvm_type();
 
-        // Extract closure pointer from the LoxValue
-        let closure_ptr_int = self.lox_value.extract_payload(&self.builder, callee);
+        // Evaluate arguments upfront (needed for both function and class calls)
+        let mut arg_vals = Vec::new();
+        for arg in &call.arguments {
+            arg_vals.push(self.compile_expr(arg)?);
+        }
+
+        // Check if callee is a class (TAG_CLASS) or function (TAG_FUNCTION)
+        let callee_tag = self.lox_value.extract_tag(&self.builder, callee);
+        let class_tag = self
+            .context
+            .i8_type()
+            .const_int(u64::from(super::types::TAG_CLASS), false);
+        let is_class = self
+            .builder
+            .build_int_compare(inkwell::IntPredicate::EQ, callee_tag, class_tag, "is_class")
+            .expect("check if class call");
+
+        let fn_call_bb = self.context.append_basic_block(current_fn, "call_fn");
+        let class_call_bb = self.context.append_basic_block(current_fn, "call_class");
+        let call_merge_bb = self.context.append_basic_block(current_fn, "call_merge");
+
+        self.builder
+            .build_conditional_branch(is_class, class_call_bb, fn_call_bb)
+            .expect("branch on call type");
+
+        // --- Function call path (existing logic) ---
+        self.builder.position_at_end(fn_call_bb);
+        let fn_result = self.emit_closure_call(callee, &arg_vals)?;
+        let fn_exit_bb = self.builder.get_insert_block().expect("have block");
+        self.builder
+            .build_unconditional_branch(call_merge_bb)
+            .expect("branch to call merge from fn");
+
+        // --- Class instantiation path ---
+        self.builder.position_at_end(class_call_bb);
+        let class_result = self.emit_class_instantiation(callee, &arg_vals)?;
+        let class_exit_bb = self.builder.get_insert_block().expect("have block");
+        self.builder
+            .build_unconditional_branch(call_merge_bb)
+            .expect("branch to call merge from class");
+
+        // Merge
+        self.builder.position_at_end(call_merge_bb);
+        let phi = self
+            .builder
+            .build_phi(lv_type, "call_result")
+            .expect("phi for call result");
+        phi.add_incoming(&[(&fn_result, fn_exit_bb), (&class_result, class_exit_bb)]);
+        Ok(phi.as_basic_value().into_struct_value())
+    }
+
+    /// Emit an indirect call through a closure struct (TAG_FUNCTION path).
+    fn emit_closure_call(
+        &mut self,
+        callee: StructValue<'ctx>,
+        args: &[StructValue<'ctx>],
+    ) -> anyhow::Result<StructValue<'ctx>> {
         let ptr_type = self.context.ptr_type(AddressSpace::default());
+        let lv_type = self.lox_value.llvm_type();
+
+        let closure_ptr_int = self.lox_value.extract_payload(&self.builder, callee);
         let closure_ptr = self
             .builder
             .build_int_to_ptr(closure_ptr_int, ptr_type, "closure_ptr")
             .expect("int to closure ptr");
 
-        // Load fn_ptr from closure struct (field 0)
         let fn_ptr_ptr = self
             .builder
             .build_struct_gep(self.closure_llvm_type(), closure_ptr, 0, "fn_ptr_ptr")
@@ -552,7 +1052,6 @@ impl<'ctx> CodeGen<'ctx> {
             .expect("load fn_ptr")
             .into_pointer_value();
 
-        // Load env from closure struct (field 3 = env pointer)
         let env_ptr_ptr = self
             .builder
             .build_struct_gep(self.closure_llvm_type(), closure_ptr, 3, "env_ptr_ptr")
@@ -563,30 +1062,116 @@ impl<'ctx> CodeGen<'ctx> {
             .expect("load env_ptr")
             .into_pointer_value();
 
-        // Build arguments: env + lox args
-        let mut args: Vec<BasicMetadataValueEnum> = vec![env_ptr.into()];
-        for arg in &call.arguments {
-            let val = self.compile_expr(arg)?;
-            args.push(val.into());
+        let mut call_args: Vec<BasicMetadataValueEnum> = vec![env_ptr.into()];
+        for arg in args {
+            call_args.push((*arg).into());
         }
 
-        // Build the function type for the indirect call
-        let lv_type = self.lox_value.llvm_type();
         let mut param_types: Vec<inkwell::types::BasicMetadataTypeEnum> = vec![ptr_type.into()];
-        for _ in &call.arguments {
+        for _ in args {
             param_types.push(lv_type.into());
         }
         let call_fn_type = lv_type.fn_type(&param_types, false);
 
         let result = self
             .builder
-            .build_indirect_call(call_fn_type, fn_ptr, &args, "call_result")
+            .build_indirect_call(call_fn_type, fn_ptr, &call_args, "fn_call_result")
             .expect("build indirect call")
             .try_as_basic_value()
             .unwrap_basic()
             .into_struct_value();
-
         Ok(result)
+    }
+
+    /// Emit class instantiation: allocate instance, call init if present, return instance.
+    fn emit_class_instantiation(
+        &mut self,
+        callee: StructValue<'ctx>,
+        args: &[StructValue<'ctx>],
+    ) -> anyhow::Result<StructValue<'ctx>> {
+        let current_fn = self.current_fn.expect("inside a function");
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+
+        // Extract class descriptor pointer
+        let class_ptr_int = self.lox_value.extract_payload(&self.builder, callee);
+        let class_ptr = self
+            .builder
+            .build_int_to_ptr(class_ptr_int, ptr_type, "class_desc_ptr")
+            .expect("int to class desc ptr");
+
+        // Allocate instance
+        let instance = self
+            .builder
+            .build_call(
+                self.runtime.lox_alloc_instance,
+                &[class_ptr.into()],
+                "instance",
+            )
+            .expect("call lox_alloc_instance")
+            .try_as_basic_value()
+            .unwrap_basic()
+            .into_struct_value();
+
+        // Find init method
+        let init_name = self
+            .builder
+            .build_global_string_ptr("init", "init_name")
+            .expect("init string");
+        let init_closure = self
+            .builder
+            .build_call(
+                self.runtime.lox_class_find_method,
+                &[class_ptr.into(), init_name.as_pointer_value().into()],
+                "init_closure",
+            )
+            .expect("call lox_class_find_method")
+            .try_as_basic_value()
+            .unwrap_basic()
+            .into_pointer_value();
+
+        // Check if init exists
+        let has_init = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::NE,
+                self.builder
+                    .build_ptr_to_int(init_closure, self.context.i64_type(), "init_int")
+                    .expect("init closure to int"),
+                self.context.i64_type().const_zero(),
+                "has_init",
+            )
+            .expect("check init null");
+
+        let call_init_bb = self.context.append_basic_block(current_fn, "call_init");
+        let skip_init_bb = self.context.append_basic_block(current_fn, "skip_init");
+
+        self.builder
+            .build_conditional_branch(has_init, call_init_bb, skip_init_bb)
+            .expect("branch on init check");
+
+        // Call init: bind to instance and call with args
+        self.builder.position_at_end(call_init_bb);
+        let bound_init = self
+            .builder
+            .build_call(
+                self.runtime.lox_bind_method,
+                &[instance.into(), init_closure.into()],
+                "bound_init",
+            )
+            .expect("call lox_bind_method for init")
+            .try_as_basic_value()
+            .unwrap_basic()
+            .into_struct_value();
+
+        // Call the bound init as a regular closure
+        self.emit_closure_call(bound_init, args)?;
+        self.builder
+            .build_unconditional_branch(skip_init_bb)
+            .expect("branch to skip init");
+
+        // Return the instance (not the init return value)
+        self.builder.position_at_end(skip_init_bb);
+        Ok(instance)
     }
 
     fn compile_return(&mut self, ret: &ReturnStmt) -> anyhow::Result<()> {
@@ -613,6 +1198,107 @@ impl<'ctx> CodeGen<'ctx> {
         self.builder.position_at_end(dead_bb);
 
         Ok(())
+    }
+
+    fn compile_get(&mut self, get: &GetExpr) -> anyhow::Result<StructValue<'ctx>> {
+        let object = self.compile_expr(&get.object)?;
+        let (name_ptr, name_len) = self.build_string_constant(&get.name);
+        let result = self
+            .builder
+            .build_call(
+                self.runtime.lox_instance_get_property,
+                &[object.into(), name_ptr.into(), name_len.into()],
+                "get_prop",
+            )
+            .expect("call lox_instance_get_property")
+            .try_as_basic_value()
+            .unwrap_basic()
+            .into_struct_value();
+        Ok(result)
+    }
+
+    fn compile_set(&mut self, set: &SetExpr) -> anyhow::Result<StructValue<'ctx>> {
+        let object = self.compile_expr(&set.object)?;
+        let value = self.compile_expr(&set.value)?;
+        let (name_ptr, name_len) = self.build_string_constant(&set.name);
+        self.builder
+            .build_call(
+                self.runtime.lox_instance_set_field,
+                &[
+                    object.into(),
+                    name_ptr.into(),
+                    name_len.into(),
+                    value.into(),
+                ],
+                "",
+            )
+            .expect("call lox_instance_set_field");
+        Ok(value)
+    }
+
+    fn compile_this(&mut self, _this: &ThisExpr) -> anyhow::Result<StructValue<'ctx>> {
+        // "this" is a local variable in method scope (loaded from env[0])
+        if let Some(storage) = self.find_local("this") {
+            Ok(self.load_var_storage(&storage, "this"))
+        } else {
+            anyhow::bail!("'this' used outside of a method")
+        }
+    }
+
+    fn compile_super(&mut self, sup: &SuperExpr) -> anyhow::Result<StructValue<'ctx>> {
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+
+        // Load the superclass LoxValue from "super" local
+        let super_val = if let Some(storage) = self.find_local("super") {
+            self.load_var_storage(&storage, "super")
+        } else {
+            anyhow::bail!("'super' used outside of a subclass method")
+        };
+
+        // Extract class descriptor pointer from superclass value
+        let super_payload = self.lox_value.extract_payload(&self.builder, super_val);
+        let super_class_ptr = self
+            .builder
+            .build_int_to_ptr(super_payload, ptr_type, "super_class_ptr")
+            .expect("super payload to ptr");
+
+        // Find the method on the superclass
+        let method_name_str = self
+            .builder
+            .build_global_string_ptr(&sup.method, "super_method_name")
+            .expect("super method name string");
+        let method_closure = self
+            .builder
+            .build_call(
+                self.runtime.lox_class_find_method,
+                &[
+                    super_class_ptr.into(),
+                    method_name_str.as_pointer_value().into(),
+                ],
+                "super_method",
+            )
+            .expect("call lox_class_find_method")
+            .try_as_basic_value()
+            .unwrap_basic()
+            .into_pointer_value();
+
+        // Bind the method to "this"
+        let this_val = self.load_var_storage(
+            &self.find_local("this").expect("this in method scope"),
+            "this_for_super",
+        );
+        let bound = self
+            .builder
+            .build_call(
+                self.runtime.lox_bind_method,
+                &[this_val.into(), method_closure.into()],
+                "bound_super",
+            )
+            .expect("call lox_bind_method")
+            .try_as_basic_value()
+            .unwrap_basic()
+            .into_struct_value();
+        Ok(bound)
     }
 
     /// Return the LLVM struct type matching the C LoxClosure struct layout.
@@ -722,18 +1408,10 @@ impl<'ctx> CodeGen<'ctx> {
             Expr::Assign(assign) => self.compile_assign(assign),
             Expr::Logical(logical) => self.compile_logical(logical),
             Expr::Call(call) => self.compile_call(call),
-            Expr::Get(_) => {
-                anyhow::bail!("get expressions not yet supported in LLVM codegen")
-            }
-            Expr::Set(_) => {
-                anyhow::bail!("set expressions not yet supported in LLVM codegen")
-            }
-            Expr::This(_) => {
-                anyhow::bail!("'this' not yet supported in LLVM codegen")
-            }
-            Expr::Super(_) => {
-                anyhow::bail!("'super' not yet supported in LLVM codegen")
-            }
+            Expr::Get(get) => self.compile_get(get),
+            Expr::Set(set) => self.compile_set(set),
+            Expr::This(this) => self.compile_this(this),
+            Expr::Super(sup) => self.compile_super(sup),
         }
     }
 
@@ -1626,6 +2304,90 @@ mod tests {
         assert!(
             ir.contains("lox_string_equal"),
             "should call string_equal for string !="
+        );
+    }
+
+    // --- Phase 6: Classes and inheritance ---
+
+    #[test]
+    fn class_declaration() {
+        let ir = compile_to_ir("class Cake {}");
+        assert!(ir.contains("lox_alloc_class"), "should allocate class");
+    }
+
+    #[test]
+    fn class_with_method() {
+        let ir = compile_to_ir("class Cake { taste() { return 42; } }");
+        assert!(
+            ir.contains("@lox_fn_Cake_taste"),
+            "should define method function"
+        );
+        assert!(
+            ir.contains("lox_class_add_method"),
+            "should add method to class"
+        );
+    }
+
+    #[test]
+    fn class_instantiation() {
+        let ir = compile_to_ir("class Cake {} var c = Cake();");
+        assert!(
+            ir.contains("lox_alloc_instance"),
+            "should allocate instance"
+        );
+        assert!(
+            ir.contains("call_class"),
+            "should have class instantiation branch"
+        );
+    }
+
+    #[test]
+    fn class_field_access() {
+        let ir = compile_to_ir(
+            "class Cake { init(f) { this.flavor = f; } } var c = Cake(1); print c.flavor;",
+        );
+        assert!(ir.contains("lox_instance_set_field"), "should set field");
+        assert!(
+            ir.contains("lox_instance_get_property"),
+            "should get property"
+        );
+    }
+
+    #[test]
+    fn class_method_call() {
+        let ir = compile_to_ir(
+            r#"class Greeter { greet() { return "hi"; } } var g = Greeter(); print g.greet();"#,
+        );
+        assert!(ir.contains("@lox_fn_Greeter_greet"), "should define method");
+        assert!(
+            ir.contains("lox_instance_get_property"),
+            "method access via get_property"
+        );
+    }
+
+    #[test]
+    fn class_inheritance() {
+        let ir = compile_to_ir("class A {} class B < A {}");
+        // Should pass superclass to lox_alloc_class
+        let alloc_count = ir.matches("lox_alloc_class").count();
+        assert!(
+            alloc_count >= 2,
+            "should allocate both classes, got {alloc_count}"
+        );
+    }
+
+    #[test]
+    fn class_super_call() {
+        let ir = compile_to_ir(
+            "class A { foo() { return 1; } } class B < A { bar() { return super.foo(); } }",
+        );
+        assert!(
+            ir.contains("lox_class_find_method"),
+            "super should find method on superclass"
+        );
+        assert!(
+            ir.contains("lox_bind_method"),
+            "super method should be bound"
         );
     }
 }

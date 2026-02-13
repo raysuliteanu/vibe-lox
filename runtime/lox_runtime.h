@@ -12,8 +12,8 @@
  *   2 = number (payload: f64 bitcast to i64)
  *   3 = string (payload: pointer to null-terminated C string, cast to i64)
  *   4 = function/closure (payload: pointer to LoxClosure, cast to i64)
- *   5 = class (future)
- *   6 = instance (future)
+ *   5 = class (payload: pointer to LoxClassDesc, cast to i64)
+ *   6 = instance (payload: pointer to LoxInstance, cast to i64)
  */
 typedef struct {
     int8_t tag;
@@ -57,6 +57,38 @@ void lox_cell_set(LoxCell *cell, LoxValue value);
 /* String operations */
 LoxValue lox_string_concat(LoxValue a, LoxValue b);
 int8_t lox_string_equal(LoxValue a, LoxValue b);
+
+/* Class/instance types and operations */
+typedef struct {
+    const char *name;
+    LoxClosure *closure;
+} LoxMethodEntry;
+
+typedef struct LoxClassDesc {
+    const char *name;
+    struct LoxClassDesc *superclass;
+    int32_t method_count;
+    LoxMethodEntry *methods;
+} LoxClassDesc;
+
+#define MAX_FIELDS 256
+typedef struct {
+    LoxClassDesc *klass;
+    int32_t field_count;
+    struct { char name[128]; LoxValue value; } fields[MAX_FIELDS];
+} LoxInstance;
+
+LoxClassDesc *lox_alloc_class(const char *name, LoxClassDesc *superclass,
+                               int32_t method_count);
+void lox_class_add_method(LoxClassDesc *klass, const char *name,
+                           LoxClosure *closure);
+LoxValue lox_alloc_instance(LoxClassDesc *klass);
+LoxValue lox_instance_get_property(LoxValue instance, const char *name,
+                                    int64_t name_len);
+void lox_instance_set_field(LoxValue instance, const char *name,
+                             int64_t name_len, LoxValue value);
+LoxClosure *lox_class_find_method(LoxClassDesc *klass, const char *name);
+LoxValue lox_bind_method(LoxValue instance, LoxClosure *method);
 
 /* Native functions */
 LoxValue lox_clock(void);
