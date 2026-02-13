@@ -8,11 +8,11 @@ LLVM IR compilation mode is on the "roadmap".
 
 1. **Tree-walk Interpreter** - Direct AST interpretation of Lox source code (no
    compilation)
-1. **Stack-based VM** - execute bytecode Lox program, compiled with
+2. **Stack-based VM** - execute bytecode Lox program, compiled with
    --compile-bytecode
-1. **Bytecode Compiler** (`--compile-bytecode`) - Compile to custom Lox bytecode
+3. **Bytecode Compiler** (`--compile-bytecode`) - Compile to custom Lox bytecode
    for use with the VM
-1. **LLVM IR Compiler** (`--compile-llvm`) - Compile to LLVM IR (planned, not yet implemented)
+4. **LLVM IR Compiler** (`--compile-llvm`) - Compile to LLVM IR (planned, not yet implemented)
 
 The architecture follows a classic compiler pipeline with clear separation between phases:
 
@@ -41,14 +41,14 @@ Each compiler phase is isolated in its own module with clear interfaces. This al
 **Two-tier error handling:**
 
 - **Domain Errors** (`LoxError`): Rich, user-facing errors using `thiserror` + `miette`
-  - Carry source spans for precise error reporting
-  - Implement `miette::Diagnostic` for fancy terminal output with source snippets
-  - Variants: `ScanError`, `ParseError`, `ResolveError`, `RuntimeError`
+    - Carry source spans for precise error reporting
+    - Implement `miette::Diagnostic` for fancy terminal output with source snippets
+    - Variants: `ScanError`, `ParseError`, `ResolveError`, `RuntimeError`
 
 - **Propagation Wrapper** (`anyhow::Result`): Used throughout for error propagation
-  - All functions return `anyhow::Result<T>`
-  - Use `.context("while doing X")` before every `?` operator
-  - Provides error context chain for debugging
+    - All functions return `anyhow::Result<T>`
+    - Use `.context("while doing X")` before every `?` operator
+    - Provides error context chain for debugging
 
 **Example:**
 
@@ -96,11 +96,11 @@ Transform source code string into a stream of tokens with precise source locatio
 #### `src/scanner/token.rs`
 
 - **`TokenKind` enum:** 50+ token variants
-  - Literals: `Number(f64)`, `String(String)`, `True`, `False`, `Nil`
-  - Operators: `Plus`, `Minus`, `Star`, `Slash`, `Bang`, `Equal`, etc.
-  - Keywords: `And`, `Class`, `Fun`, `For`, `If`, `While`, `Return`, etc.
-  - Delimiters: `LeftParen`, `RightParen`, `LeftBrace`, etc.
-  - Special: `Eof`
+    - Literals: `Number(f64)`, `String(String)`, `True`, `False`, `Nil`
+    - Operators: `Plus`, `Minus`, `Star`, `Slash`, `Bang`, `Equal`, etc.
+    - Keywords: `And`, `Class`, `Fun`, `For`, `If`, `While`, `Return`, etc.
+    - Delimiters: `LeftParen`, `RightParen`, `LeftBrace`, etc.
+    - Special: `Eof`
 
 - **`Token` struct:**
 
@@ -125,29 +125,29 @@ Transform source code string into a stream of tokens with precise source locatio
 
 - **Implementation:** Uses `winnow` parser combinator library
 - **Key Functions:**
-  - `scan_all()` - Main entry point, collects all tokens
-  - `scan_token()` - Parse single token with error recovery
-  - `whitespace_and_comments()` - Skip whitespace and `//` comments
-  - `string_literal()` - Parse strings with escape sequences (`\n`, `\t`, `\\`, `\"`)
-  - `number_literal()` - Parse integers and decimals
-  - `identifier_or_keyword()` - Parse identifiers, match keywords
-  - `two_char_token()` - Parse `==`, `!=`, `<=`, `>=`
-  - `single_char_token()` - Parse single-char operators
+    - `scan_all()` - Main entry point, collects all tokens
+    - `scan_token()` - Parse single token with error recovery
+    - `whitespace_and_comments()` - Skip whitespace and `//` comments
+    - `string_literal()` - Parse strings with escape sequences (`\n`, `\t`, `\\`, `\"`)
+    - `number_literal()` - Parse integers and decimals
+    - `identifier_or_keyword()` - Parse identifiers, match keywords
+    - `two_char_token()` - Parse `==`, `!=`, `<=`, `>=`
+    - `single_char_token()` - Parse single-char operators
 
 ### Design Decisions
 
 1. **Tokens own lexemes:** Each `Token` owns its `String` lexeme rather than using string slices
-   - Simplifies lifetime management in later phases
-   - Allows tokens to outlive source string
+    - Simplifies lifetime management in later phases
+    - Allows tokens to outlive source string
 
 2. **winnow for parsing:** Parser combinator library instead of hand-written scanner
-   - Composable parsers
-   - Built-in span tracking with `Located<&str>`
-   - Clean error handling
+    - Composable parsers
+    - Built-in span tracking with `Located<&str>`
+    - Clean error handling
 
 3. **Error recovery:** Scanner collects all errors before returning
-   - Allows reporting multiple syntax errors at once
-   - Better user experience than stopping at first error
+    - Allows reporting multiple syntax errors at once
+    - Better user experience than stopping at first error
 
 ### Data Flow
 
@@ -244,10 +244,10 @@ pub enum LiteralValue {
 #### `src/ast/printer.rs`
 
 - **`to_sexp(program) -> String`**: S-expression format for debugging
-  - Example: `(binary (literal 1) + (literal 2))`
+    - Example: `(binary (literal 1) + (literal 2))`
 
 - **`to_json(program) -> String`**: JSON format via `serde_json`
-  - Machine-readable, includes all node details and spans
+    - Machine-readable, includes all node details and spans
 
 #### `src/parser/mod.rs`
 
@@ -287,14 +287,14 @@ impl Parser {
 ### Design Decisions
 
 1. **Recursive descent:** Hand-written parser following grammar structure
-   - Each grammar rule becomes a method
-   - Natural expression precedence via method call chain
-   - Easy to understand and debug
+    - Each grammar rule becomes a method
+    - Natural expression precedence via method call chain
+    - Easy to understand and debug
 
 2. **Error recovery:** Panic-mode synchronization
-   - On error, skip tokens until next statement boundary
-   - Collect all errors, continue parsing
-   - Returns all errors at end
+    - On error, skip tokens until next statement boundary
+    - Collect all errors, continue parsing
+    - Returns all errors at end
 
 3. **Desugar `for` to `while`:**
 
@@ -306,8 +306,8 @@ impl Parser {
    ```
 
 4. **Max 255 parameters/arguments:** Enforced during parsing
-   - Matches bytecode limit (single byte for count)
-   - Error reported with source span
+    - Matches bytecode limit (single byte for count)
+    - Error reported with source span
 
 ### Data Flow
 
@@ -596,7 +596,7 @@ impl LoxClass {
 
 impl LoxInstance {
     pub fn get(&self, name: &str, instance: &Rc<RefCell<LoxInstance>>)
-        -> Result<Value, LoxError> {
+               -> Result<Value, LoxError> {
         // Check fields first, then methods (bind `this`)
     }
 
@@ -627,9 +627,9 @@ Uses Rust's `Result` for control flow:
 Return(Value)  // Not really an error, used for unwinding
 
 // In function call:
-match self.call_function(...) {
-    Err(LoxError::Return(value)) => Ok(value),
-    other => other,
+match self .call_function(...) {
+Err(LoxError::Return(value)) => Ok(value),
+other => other,
 }
 ```
 
@@ -679,23 +679,53 @@ Bytecode representation.
 #[repr(u8)]
 pub enum OpCode {
     // Constants
-    Constant, Nil, True, False,
+    Constant,
+    Nil,
+    True,
+    False,
 
     // Stack operations
-    Pop, GetLocal, SetLocal, GetGlobal, SetGlobal, DefineGlobal,
-    GetUpvalue, SetUpvalue, GetProperty, SetProperty, GetSuper,
+    Pop,
+    GetLocal,
+    SetLocal,
+    GetGlobal,
+    SetGlobal,
+    DefineGlobal,
+    GetUpvalue,
+    SetUpvalue,
+    GetProperty,
+    SetProperty,
+    GetSuper,
 
     // Operators
-    Equal, Greater, Less, Add, Subtract, Multiply, Divide, Not, Negate,
+    Equal,
+    Greater,
+    Less,
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
+    Not,
+    Negate,
 
     // Control flow
-    Print, Jump, JumpIfFalse, Loop, Call, Invoke, SuperInvoke,
+    Print,
+    Jump,
+    JumpIfFalse,
+    Loop,
+    Call,
+    Invoke,
+    SuperInvoke,
 
     // Functions and closures
-    Closure, CloseUpvalue, Return,
+    Closure,
+    CloseUpvalue,
+    Return,
 
     // Classes
-    Class, Inherit, Method,
+    Class,
+    Inherit,
+    Method,
 }
 
 pub enum Constant {
@@ -798,28 +828,28 @@ impl Compiler {
 **Compilation Strategy:**
 
 1. **Variables:**
-   - Globals: Use `DefineGlobal`, `GetGlobal`, `SetGlobal` with constant pool index
-   - Locals: Use `GetLocal`, `SetLocal` with stack slot index
-   - Upvalues: Use `GetUpvalue`, `SetUpvalue` with upvalue index
+    - Globals: Use `DefineGlobal`, `GetGlobal`, `SetGlobal` with constant pool index
+    - Locals: Use `GetLocal`, `SetLocal` with stack slot index
+    - Upvalues: Use `GetUpvalue`, `SetUpvalue` with upvalue index
 
 2. **Control flow:**
-   - `if`: Compile condition, emit `JumpIfFalse` with placeholder, compile then-branch,
-     patch jump, compile else-branch
-   - `while`: Mark loop start, compile condition, emit `JumpIfFalse` to end,
-     compile body, emit `Loop` back to start
-   - Logical `and`/`or`: Short-circuit with conditional jumps
+    - `if`: Compile condition, emit `JumpIfFalse` with placeholder, compile then-branch,
+      patch jump, compile else-branch
+    - `while`: Mark loop start, compile condition, emit `JumpIfFalse` to end,
+      compile body, emit `Loop` back to start
+    - Logical `and`/`or`: Short-circuit with conditional jumps
 
 3. **Functions:**
-   - Push new `CompilerState` onto stack
-   - Compile parameters as locals
-   - Compile body
-   - Pop state, emit `Closure` instruction with upvalue info
-   - Nested functions access parent's upvalues
+    - Push new `CompilerState` onto stack
+    - Compile parameters as locals
+    - Compile body
+    - Pop state, emit `Closure` instruction with upvalue info
+    - Nested functions access parent's upvalues
 
 4. **Classes:**
-   - Emit `Class` instruction
-   - For each method: compile as function, emit `Method`
-   - For inheritance: emit `Inherit`, create `super` scope
+    - Emit `Class` instruction
+    - For each method: compile as function, emit `Method`
+    - For inheritance: emit `Inherit`, create `super` scope
 
 #### `src/vm/vm.rs`
 
@@ -987,15 +1017,15 @@ LLVM 21).
 
 All Lox values are represented as a tagged union struct `{ i8, i64 }`:
 
-| Tag | Type     | Payload                                |
-| --- | -------- | -------------------------------------- |
-| 0   | nil      | unused (0)                             |
-| 1   | bool     | 0 or 1                                 |
-| 2   | number   | f64 bitcast to i64                     |
-| 3   | string   | pointer to null-terminated C string    |
-| 4   | function | pointer to closure struct (future)     |
-| 5   | class    | pointer to class descriptor (future)   |
-| 6   | instance | pointer to instance struct (future)    |
+| Tag | Type     | Payload                              |
+|-----|----------|--------------------------------------|
+| 0   | nil      | unused (0)                           |
+| 1   | bool     | 0 or 1                               |
+| 2   | number   | f64 bitcast to i64                   |
+| 3   | string   | pointer to null-terminated C string  |
+| 4   | function | pointer to closure struct (future)   |
+| 5   | class    | pointer to class descriptor (future) |
+| 6   | instance | pointer to instance struct (future)  |
 
 ### Key Modules
 
@@ -1231,7 +1261,7 @@ Both backends produce frames in innermost-first order (most recent call at index
 ### When to Use Each Error Type
 
 | Situation           | Error Type              | Has Source Context? | Shows Line Number?          |
-| ------------------- | ----------------------- | ------------------- | --------------------------- |
+|---------------------|-------------------------|---------------------|-----------------------------|
 | Lexical error       | `CompileError::Scan`    | Yes (miette)        | Yes (miette)                |
 | Syntax error        | `CompileError::Parse`   | Yes (miette)        | Yes (miette)                |
 | Semantic error      | `CompileError::Resolve` | Yes (miette)        | Yes (miette)                |
@@ -1280,7 +1310,7 @@ Error: line 3: operands must be numbers
 ```rust
 // Requires offset and length from span
 CompileError::parse("expected ';'", token.span.offset, token.span.len)
-    .with_source_code(filename, source_code)
+.with_source_code(filename, source_code)
 ```
 
 **Creating runtime errors:**
@@ -1301,15 +1331,15 @@ RuntimeError::Return { value }
 ```rust
 // Compile errors (main.rs):
 for error in errors {
-    let error_with_src = error.with_source_code(filename, source);
-    eprintln!("{:?}", miette::Report::new(error_with_src));
+let error_with_src = error.with_source_code(filename, source);
+eprintln ! ("{:?}", miette::Report::new(error_with_src));
 }
 
 // Runtime errors (main.rs):
 if let Some(source) = source_code {
-    eprintln!("{}", error.display_with_line(source));  // Interpreter
+eprintln!("{}", error.display_with_line(source));  // Interpreter
 } else {
-    eprintln!("{}", error);  // VM
+eprintln ! ("{}", error);  // VM
 }
 ```
 
@@ -1425,7 +1455,7 @@ fn fixture_fibonacci() {
 ### Test Coverage
 
 | Component      | Coverage |
-| -------------- | -------- |
+|----------------|----------|
 | Scanner        | ~95%     |
 | Parser         | ~90%     |
 | Resolver       | ~95%     |
@@ -1499,9 +1529,9 @@ inkwell = "0.x"         # LLVM bindings (Phase 7)
 - Emit LLVM IR using `inkwell` crate
 - Compile to native code via LLVM backend
 - Support for:
-  - Arithmetic and basic operations
-  - Functions (no closures initially)
-  - Type-specific optimizations
+    - Arithmetic and basic operations
+    - Functions (no closures initially)
+    - Type-specific optimizations
 
 **Challenges:**
 
