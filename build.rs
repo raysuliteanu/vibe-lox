@@ -5,6 +5,8 @@ use std::process::Command;
 fn main() {
     println!("cargo:rerun-if-changed=runtime/lox_runtime.c");
     println!("cargo:rerun-if-changed=runtime/lox_runtime.h");
+    // Re-run if the output is deleted so it gets rebuilt
+    println!("cargo:rerun-if-changed=runtime/liblox_runtime.so");
 
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is always set");
     let runtime_dir = Path::new(&manifest_dir).join("runtime");
