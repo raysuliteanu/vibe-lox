@@ -1,10 +1,12 @@
+use std::collections::HashMap;
+
 use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::module::Module;
-use inkwell::values::{BasicValueEnum, FunctionValue, StructValue};
+use inkwell::values::{BasicValueEnum, FunctionValue, PointerValue, StructValue};
 
 use crate::ast::{
-    AssignExpr, BinaryExpr, BinaryOp, BlockStmt, Decl, Expr, ExprStmt, IfStmt, LiteralExpr,
+    AssignExpr, BinaryExpr, BinaryOp, BlockStmt, Decl, Expr, ExprId, ExprStmt, IfStmt, LiteralExpr,
     LiteralValue, LogicalExpr, LogicalOp, PrintStmt, Program, Stmt, UnaryExpr, UnaryOp, VarDecl,
     VariableExpr, WhileStmt,
 };
@@ -14,8 +16,9 @@ use super::types::LoxValueType;
 
 /// LLVM IR code generator for Lox programs.
 ///
-/// Walks the AST and emits LLVM IR using inkwell. In Phase 1 this handles
-/// literals, arithmetic, comparisons, unary ops, print, and global variables.
+/// Walks the AST and emits LLVM IR using inkwell. Handles literals, arithmetic,
+/// comparisons, unary ops, print, global and local variables, control flow,
+/// and logical operators.
 pub struct CodeGen<'ctx> {
     context: &'ctx Context,
     module: Module<'ctx>,
@@ -24,10 +27,16 @@ pub struct CodeGen<'ctx> {
     runtime: RuntimeDecls<'ctx>,
     /// The current function being compiled into.
     current_fn: Option<FunctionValue<'ctx>>,
+    /// Variable resolution results from the resolver: ExprId → scope depth.
+    /// If an ExprId is present, the variable is local; otherwise it's global.
+    locals: HashMap<ExprId, usize>,
+    /// Stack of local variable scopes. Each scope maps variable names to
+    /// their alloca pointers (which store LoxValue structs).
+    scopes: Vec<HashMap<String, PointerValue<'ctx>>>,
 }
 
 impl<'ctx> CodeGen<'ctx> {
-    pub fn new(context: &'ctx Context, module_name: &str) -> Self {
+    pub fn new(context: &'ctx Context, module_name: &str, locals: HashMap<ExprId, usize>) -> Self {
         let module = context.create_module(module_name);
         let builder = context.create_builder();
         let lox_value = LoxValueType::new(context);
@@ -39,6 +48,8 @@ impl<'ctx> CodeGen<'ctx> {
             lox_value,
             runtime,
             current_fn: None,
+            locals,
+            scopes: Vec::new(),
         }
     }
 
@@ -85,7 +96,21 @@ impl<'ctx> CodeGen<'ctx> {
             Some(expr) => self.compile_expr(expr)?,
             None => self.lox_value.build_nil(&self.builder),
         };
-        self.emit_global_set(&var_decl.name, value);
+
+        if self.scopes.is_empty() {
+            // Top-level: store as global
+            self.emit_global_set(&var_decl.name, value);
+        } else {
+            // Local: create alloca in entry block and store value
+            let alloca = self.create_entry_block_alloca(&var_decl.name);
+            self.builder
+                .build_store(alloca, value)
+                .expect("store local var initializer");
+            self.scopes
+                .last_mut()
+                .expect("checked non-empty above")
+                .insert(var_decl.name.clone(), alloca);
+        }
         Ok(())
     }
 
@@ -116,9 +141,11 @@ impl<'ctx> CodeGen<'ctx> {
     }
 
     fn compile_block(&mut self, block: &BlockStmt) -> anyhow::Result<()> {
+        self.begin_scope();
         for decl in &block.declarations {
             self.compile_decl(decl)?;
         }
+        self.end_scope();
         Ok(())
     }
 
@@ -466,13 +493,67 @@ impl<'ctx> CodeGen<'ctx> {
     }
 
     fn compile_variable(&mut self, var: &VariableExpr) -> anyhow::Result<StructValue<'ctx>> {
-        Ok(self.emit_global_get(&var.name))
+        if let Some(&depth) = self.locals.get(&var.id) {
+            let alloca = self.resolve_local(&var.name, depth);
+            let loaded = self
+                .builder
+                .build_load(self.lox_value.llvm_type(), alloca, &var.name)
+                .expect("load local variable");
+            Ok(loaded.into_struct_value())
+        } else {
+            Ok(self.emit_global_get(&var.name))
+        }
     }
 
     fn compile_assign(&mut self, assign: &AssignExpr) -> anyhow::Result<StructValue<'ctx>> {
         let value = self.compile_expr(&assign.value)?;
-        self.emit_global_set(&assign.name, value);
+        if let Some(&depth) = self.locals.get(&assign.id) {
+            let alloca = self.resolve_local(&assign.name, depth);
+            self.builder
+                .build_store(alloca, value)
+                .expect("store to local variable");
+        } else {
+            self.emit_global_set(&assign.name, value);
+        }
         Ok(value)
+    }
+
+    // --- Scope management ---
+
+    fn begin_scope(&mut self) {
+        self.scopes.push(HashMap::new());
+    }
+
+    fn end_scope(&mut self) {
+        self.scopes.pop();
+    }
+
+    /// Look up a local variable by name at the given scope depth.
+    /// Depth 0 means the innermost (current) scope, 1 means one level out, etc.
+    fn resolve_local(&self, name: &str, depth: usize) -> PointerValue<'ctx> {
+        let scope_index = self.scopes.len() - 1 - depth;
+        *self.scopes[scope_index]
+            .get(name)
+            .unwrap_or_else(|| panic!("local variable '{name}' not found at depth {depth}"))
+    }
+
+    /// Create an alloca in the entry block of the current function.
+    /// Placing all allocas in the entry block is LLVM best practice for mem2reg.
+    fn create_entry_block_alloca(&self, name: &str) -> PointerValue<'ctx> {
+        let current_fn = self.current_fn.expect("must be inside a function");
+        let entry = current_fn
+            .get_first_basic_block()
+            .expect("function has entry block");
+
+        // Create a temporary builder positioned at the start of the entry block
+        let alloca_builder = self.context.create_builder();
+        match entry.get_first_instruction() {
+            Some(first_instr) => alloca_builder.position_before(&first_instr),
+            None => alloca_builder.position_at_end(entry),
+        }
+        alloca_builder
+            .build_alloca(self.lox_value.llvm_type(), name)
+            .expect("build alloca for local var")
     }
 
     // --- Helpers ---
@@ -528,14 +609,16 @@ impl<'ctx> CodeGen<'ctx> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::interpreter::resolver::Resolver;
     use crate::parser::Parser;
     use crate::scanner;
 
     fn compile_to_ir(source: &str) -> String {
         let tokens = scanner::scan(source).expect("scan succeeds");
         let program = Parser::new(tokens).parse().expect("parse succeeds");
+        let locals = Resolver::new().resolve(&program).expect("resolve succeeds");
         let context = Context::create();
-        let codegen = CodeGen::new(&context, "test");
+        let codegen = CodeGen::new(&context, "test", locals);
         codegen.compile(&program).expect("compile succeeds")
     }
 
@@ -727,5 +810,79 @@ mod tests {
         let ir = compile_to_ir("var a = 0; var b = 1; while (a < 5 and b > 0) { a = a + 1; }");
         assert!(ir.contains("while_cond"));
         assert!(ir.contains("log_rhs"), "and in while condition");
+    }
+
+    // --- Phase 3: Local variables and scoping ---
+
+    #[test]
+    fn local_var() {
+        let ir = compile_to_ir("{ var x = 1; print x; }");
+        // Local var should use alloca+store+load, not global_set/global_get calls
+        assert!(ir.contains("alloca"), "should use alloca for local var");
+        assert!(ir.contains("store"), "should store to local var");
+        assert!(ir.contains("load"), "should load from local var");
+        assert!(
+            !ir.contains("call void @lox_global_set"),
+            "local var should not call global_set"
+        );
+    }
+
+    #[test]
+    fn scope_shadowing() {
+        let ir = compile_to_ir(
+            r#"var x = "global";
+            {
+                var x = "local";
+                print x;
+            }
+            print x;"#,
+        );
+        // Should have both a global_set call (for outer x) and alloca (for inner x)
+        assert!(
+            ir.contains("call void @lox_global_set"),
+            "outer x is global"
+        );
+        assert!(ir.contains("alloca"), "inner x uses alloca");
+    }
+
+    #[test]
+    fn nested_blocks() {
+        let ir = compile_to_ir("{ var a = 1; { var b = 2; print a; print b; } }");
+        // Both local vars should use allocas
+        let alloca_count = ir.matches("alloca").count();
+        assert!(
+            alloca_count >= 2,
+            "should have allocas for both local vars, got {alloca_count}"
+        );
+    }
+
+    #[test]
+    fn local_var_assignment() {
+        let ir = compile_to_ir("{ var x = 1; x = 2; print x; }");
+        // Assignment to local should use store, not global_set calls
+        let store_count = ir.matches("store").count();
+        assert!(
+            store_count >= 2,
+            "should have stores for init and assignment, got {store_count}"
+        );
+        assert!(
+            !ir.contains("call void @lox_global_set"),
+            "local assignment should not call global_set"
+        );
+    }
+
+    #[test]
+    fn mixed_global_and_local() {
+        let ir = compile_to_ir("var g = 1; { var l = 2; print g; print l; }");
+        // Global uses global_set/global_get calls, local uses alloca/load
+        assert!(
+            ir.contains("call void @lox_global_set"),
+            "global var calls global_set"
+        );
+        assert!(
+            ir.contains("@lox_global_get"),
+            "reading global from block calls global_get"
+        );
+        assert!(ir.contains("alloca"), "local var uses alloca");
     }
 }
