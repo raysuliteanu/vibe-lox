@@ -785,19 +785,72 @@ impl<'ctx> CodeGen<'ctx> {
         left: StructValue<'ctx>,
         right: StructValue<'ctx>,
     ) -> anyhow::Result<StructValue<'ctx>> {
-        // Phase 1: numeric addition only. String concatenation added later.
+        let current_fn = self.current_fn.expect("must be inside a function");
+        let left_tag = self.lox_value.extract_tag(&self.builder, left);
+        let string_tag = self
+            .context
+            .i8_type()
+            .const_int(u64::from(super::types::TAG_STRING), false);
+        let is_string = self
+            .builder
+            .build_int_compare(inkwell::IntPredicate::EQ, left_tag, string_tag, "is_str")
+            .expect("compare tag to TAG_STRING");
+
+        let num_bb = self.context.append_basic_block(current_fn, "add_num");
+        let str_bb = self.context.append_basic_block(current_fn, "add_str");
+        let merge_bb = self.context.append_basic_block(current_fn, "add_merge");
+
+        self.builder
+            .build_conditional_branch(is_string, str_bb, num_bb)
+            .expect("branch on add type");
+
+        // Number addition
+        self.builder.position_at_end(num_bb);
         let lhs = self.lox_value.extract_number(&self.builder, left);
         let rhs = self.lox_value.extract_number(&self.builder, right);
-        let result = self
+        let num_result = self
             .builder
             .build_float_add(lhs, rhs, "add")
             .expect("float add");
-        let payload = self
+        let num_payload = self
             .builder
-            .build_bit_cast(result, self.context.i64_type(), "add_i64")
+            .build_bit_cast(num_result, self.context.i64_type(), "add_i64")
             .expect("bitcast add result")
             .into_int_value();
-        Ok(self.lox_value.build_tagged_number(&self.builder, payload))
+        let num_val = self
+            .lox_value
+            .build_tagged_number(&self.builder, num_payload);
+        let num_exit_bb = self.builder.get_insert_block().expect("have block");
+        self.builder
+            .build_unconditional_branch(merge_bb)
+            .expect("branch to merge from num add");
+
+        // String concatenation
+        self.builder.position_at_end(str_bb);
+        let str_val = self
+            .builder
+            .build_call(
+                self.runtime.lox_string_concat,
+                &[left.into(), right.into()],
+                "concat",
+            )
+            .expect("call lox_string_concat")
+            .try_as_basic_value()
+            .unwrap_basic()
+            .into_struct_value();
+        let str_exit_bb = self.builder.get_insert_block().expect("have block");
+        self.builder
+            .build_unconditional_branch(merge_bb)
+            .expect("branch to merge from str concat");
+
+        // Merge
+        self.builder.position_at_end(merge_bb);
+        let phi = self
+            .builder
+            .build_phi(self.lox_value.llvm_type(), "add_result")
+            .expect("build phi for add");
+        phi.add_incoming(&[(&num_val, num_exit_bb), (&str_val, str_exit_bb)]);
+        Ok(phi.as_basic_value().into_struct_value())
     }
 
     fn compile_numeric_binop(
@@ -864,6 +917,7 @@ impl<'ctx> CodeGen<'ctx> {
         right: StructValue<'ctx>,
         negate: bool,
     ) -> anyhow::Result<StructValue<'ctx>> {
+        let current_fn = self.current_fn.expect("must be inside a function");
         let left_tag = self.lox_value.extract_tag(&self.builder, left);
         let right_tag = self.lox_value.extract_tag(&self.builder, right);
         let tags_equal = self
@@ -871,6 +925,51 @@ impl<'ctx> CodeGen<'ctx> {
             .build_int_compare(inkwell::IntPredicate::EQ, left_tag, right_tag, "tags_eq")
             .expect("compare tags");
 
+        // If tags differ, values are not equal — skip to merge with false
+        let same_tag_bb = self.context.append_basic_block(current_fn, "eq_same_tag");
+        let merge_bb = self.context.append_basic_block(current_fn, "eq_merge");
+        let entry_bb = self.builder.get_insert_block().expect("have block");
+        self.builder
+            .build_conditional_branch(tags_equal, same_tag_bb, merge_bb)
+            .expect("branch on tag equality");
+
+        // Same-tag path: check if strings (need content comparison) or other (payload compare)
+        self.builder.position_at_end(same_tag_bb);
+        let string_tag = self
+            .context
+            .i8_type()
+            .const_int(u64::from(super::types::TAG_STRING), false);
+        let is_string = self
+            .builder
+            .build_int_compare(inkwell::IntPredicate::EQ, left_tag, string_tag, "is_str")
+            .expect("check if string tag");
+
+        let str_eq_bb = self.context.append_basic_block(current_fn, "eq_str");
+        let payload_eq_bb = self.context.append_basic_block(current_fn, "eq_payload");
+        self.builder
+            .build_conditional_branch(is_string, str_eq_bb, payload_eq_bb)
+            .expect("branch on string check");
+
+        // String equality: call lox_string_equal
+        self.builder.position_at_end(str_eq_bb);
+        let str_eq = self
+            .builder
+            .build_call(
+                self.runtime.lox_string_equal,
+                &[left.into(), right.into()],
+                "str_eq",
+            )
+            .expect("call lox_string_equal")
+            .try_as_basic_value()
+            .unwrap_basic()
+            .into_int_value();
+        let str_eq_exit = self.builder.get_insert_block().expect("have block");
+        self.builder
+            .build_unconditional_branch(merge_bb)
+            .expect("branch from str eq");
+
+        // Payload equality: compare i64 payloads directly
+        self.builder.position_at_end(payload_eq_bb);
         let left_payload = self.lox_value.extract_payload(&self.builder, left);
         let right_payload = self.lox_value.extract_payload(&self.builder, right);
         let payloads_equal = self
@@ -882,11 +981,24 @@ impl<'ctx> CodeGen<'ctx> {
                 "payloads_eq",
             )
             .expect("compare payloads");
+        let payload_exit = self.builder.get_insert_block().expect("have block");
+        self.builder
+            .build_unconditional_branch(merge_bb)
+            .expect("branch from payload eq");
 
-        let equal = self
+        // Merge: phi for equality result
+        self.builder.position_at_end(merge_bb);
+        let false_val = self.context.bool_type().const_zero();
+        let phi = self
             .builder
-            .build_and(tags_equal, payloads_equal, "equal")
-            .expect("and tags and payloads");
+            .build_phi(self.context.bool_type(), "eq_result")
+            .expect("build phi for equality");
+        phi.add_incoming(&[
+            (&false_val, entry_bb),          // tags differ → false
+            (&str_eq, str_eq_exit),          // string comparison result
+            (&payloads_equal, payload_exit), // payload comparison result
+        ]);
+        let equal = phi.as_basic_value().into_int_value();
 
         let result = if negate {
             self.builder
@@ -1482,6 +1594,38 @@ mod tests {
         assert!(
             ir.contains("lox_clock_wrapper"),
             "should have clock wrapper"
+        );
+    }
+
+    // --- Phase 5: String operations ---
+
+    #[test]
+    fn string_concat() {
+        let ir = compile_to_ir(r#"var a = "hello"; var b = " world"; print a + b;"#);
+        assert!(
+            ir.contains("lox_string_concat"),
+            "should call string concat for string +"
+        );
+        assert!(ir.contains("add_str"), "should have string add branch");
+        assert!(ir.contains("add_num"), "should have number add branch");
+    }
+
+    #[test]
+    fn string_equality() {
+        let ir = compile_to_ir(r#"var a = "abc"; var b = "abc"; print a == b;"#);
+        assert!(
+            ir.contains("lox_string_equal"),
+            "should call string_equal for string =="
+        );
+        assert!(ir.contains("eq_str"), "should have string equality branch");
+    }
+
+    #[test]
+    fn string_inequality() {
+        let ir = compile_to_ir(r#"var a = "abc"; var b = "def"; print a != b;"#);
+        assert!(
+            ir.contains("lox_string_equal"),
+            "should call string_equal for string !="
         );
     }
 }

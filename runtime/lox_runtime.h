@@ -54,6 +54,10 @@ LoxCell *lox_alloc_cell(LoxValue initial);
 LoxValue lox_cell_get(LoxCell *cell);
 void lox_cell_set(LoxCell *cell, LoxValue value);
 
+/* String operations */
+LoxValue lox_string_concat(LoxValue a, LoxValue b);
+int8_t lox_string_equal(LoxValue a, LoxValue b);
+
 /* Native functions */
 LoxValue lox_clock(void);
 

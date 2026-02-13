@@ -17,6 +17,8 @@ pub struct RuntimeDecls<'ctx> {
     pub lox_alloc_cell: FunctionValue<'ctx>,
     pub lox_cell_get: FunctionValue<'ctx>,
     pub lox_cell_set: FunctionValue<'ctx>,
+    pub lox_string_concat: FunctionValue<'ctx>,
+    pub lox_string_equal: FunctionValue<'ctx>,
     pub lox_clock: FunctionValue<'ctx>,
 }
 
@@ -80,6 +82,15 @@ impl<'ctx> RuntimeDecls<'ctx> {
         let lox_cell_set_ty = void_type.fn_type(&[ptr_type.into(), lv_type.into()], false);
         let lox_cell_set = module.add_function("lox_cell_set", lox_cell_set_ty, None);
 
+        // LoxValue lox_string_concat(LoxValue a, LoxValue b)
+        let lox_string_concat_ty = lv_type.fn_type(&[lv_type.into(), lv_type.into()], false);
+        let lox_string_concat =
+            module.add_function("lox_string_concat", lox_string_concat_ty, None);
+
+        // i1 lox_string_equal(LoxValue a, LoxValue b)
+        let lox_string_equal_ty = i1_type.fn_type(&[lv_type.into(), lv_type.into()], false);
+        let lox_string_equal = module.add_function("lox_string_equal", lox_string_equal_ty, None);
+
         // LoxValue lox_clock(void)
         let lox_clock_ty = lv_type.fn_type(&[], false);
         let lox_clock = module.add_function("lox_clock", lox_clock_ty, None);
@@ -94,6 +105,8 @@ impl<'ctx> RuntimeDecls<'ctx> {
             lox_alloc_cell,
             lox_cell_get,
             lox_cell_set,
+            lox_string_concat,
+            lox_string_equal,
             lox_clock,
         }
     }

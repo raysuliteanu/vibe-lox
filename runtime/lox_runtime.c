@@ -148,6 +148,26 @@ LoxValue lox_cell_get(LoxCell *cell) { return *cell; }
 
 void lox_cell_set(LoxCell *cell, LoxValue value) { *cell = value; }
 
+LoxValue lox_string_concat(LoxValue a, LoxValue b) {
+  const char *sa = (const char *)(intptr_t)a.payload;
+  const char *sb = (const char *)(intptr_t)b.payload;
+  size_t la = strlen(sa);
+  size_t lb = strlen(sb);
+  char *result = malloc(la + lb + 1);
+  memcpy(result, sa, la);
+  memcpy(result + la, sb, lb + 1);
+  LoxValue v;
+  v.tag = TAG_STRING;
+  v.payload = (int64_t)(intptr_t)result;
+  return v;
+}
+
+int8_t lox_string_equal(LoxValue a, LoxValue b) {
+  const char *sa = (const char *)(intptr_t)a.payload;
+  const char *sb = (const char *)(intptr_t)b.payload;
+  return strcmp(sa, sb) == 0 ? 1 : 0;
+}
+
 LoxValue lox_clock(void) {
   struct timespec ts;
   clock_gettime(CLOCK_MONOTONIC, &ts);

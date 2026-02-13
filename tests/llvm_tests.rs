@@ -93,3 +93,10 @@ fn llvm_fixture_counter() {
     let expected = include_str!("../fixtures/counter.expected");
     assert_eq!(output, expected);
 }
+
+#[test]
+fn llvm_fixture_strings() {
+    let output = run_llvm_fixture("strings.lox");
+    let expected = include_str!("../fixtures/strings.expected");
+    assert_eq!(output, expected);
+}
