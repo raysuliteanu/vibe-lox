@@ -3,8 +3,8 @@
 ## Overview
 
 **vibe-lox** is a Lox language interpreter and compiler implemented in Rust.
-It can directly interpret Lox source code, or compile and execute bytecode. An
-LLVM IR compilation mode is on the "roadmap".
+It can directly interpret Lox source code, compile and execute bytecode, or
+compile to LLVM IR for execution via `lli`.
 
 1. **Tree-walk Interpreter** - Direct AST interpretation of Lox source code (no
    compilation)
@@ -12,7 +12,8 @@ LLVM IR compilation mode is on the "roadmap".
    --compile-bytecode
 3. **Bytecode Compiler** (`--compile-bytecode`) - Compile to custom Lox bytecode
    for use with the VM
-4. **LLVM IR Compiler** (`--compile-llvm`) - Compile to LLVM IR (planned, not yet implemented)
+4. **LLVM IR Compiler** (`--compile-llvm`) - Compile to LLVM IR, run via `lli`
+   with the C runtime library
 
 The architecture follows a classic compiler pipeline with clear separation between phases:
 
@@ -22,6 +23,8 @@ Source Code → Tokenization → Parsing → AST → [Resolution] → Execution
                                          Interpreter
                                               ↓
                                        Bytecode Compiler → VM
+                                              ↓
+                                       LLVM IR Codegen → lli
 ```
 
 ---
@@ -71,7 +74,7 @@ The tokenizer and parser are shared across all execution backends:
 
 - Tree-walk interpreter operates directly on the AST
 - Bytecode VM compiles the AST to bytecode
-- LLVM compiler (planned) will also consume the AST
+- LLVM IR codegen compiles the AST to LLVM IR text files
 
 This ensures all backends handle the same language semantics.
 
@@ -1023,9 +1026,9 @@ All Lox values are represented as a tagged union struct `{ i8, i64 }`:
 | 1   | bool     | 0 or 1                               |
 | 2   | number   | f64 bitcast to i64                   |
 | 3   | string   | pointer to null-terminated C string  |
-| 4   | function | pointer to closure struct (future)   |
-| 5   | class    | pointer to class descriptor (future) |
-| 6   | instance | pointer to instance struct (future)  |
+| 4   | function | pointer to closure struct             |
+| 5   | class    | pointer to class descriptor          |
+| 6   | instance | pointer to instance struct           |
 
 ### Key Modules
 
@@ -1036,30 +1039,46 @@ All Lox values are represented as a tagged union struct `{ i8, i64 }`:
 - Builder methods: `build_nil()`, `build_number()`, `build_bool()`, etc.
 - Extractor methods: `extract_tag()`, `extract_payload()`, `extract_number()`
 
+#### `src/codegen/capture.rs`
+
+- `CaptureInfo`: Pre-codegen AST pass identifying variables that cross function
+  boundaries and need heap-allocated cells
+- Handles classes with synthetic `__class_Name` scopes for `this`/`super`
+
 #### `src/codegen/runtime.rs`
 
-- `RuntimeDecls`: Declares external C runtime functions in the LLVM module
+- `RuntimeDecls`: Declares all external C runtime functions in the LLVM module
 - Functions: `lox_print`, `lox_global_get`, `lox_global_set`,
-  `lox_value_truthy`, `lox_runtime_error`
+  `lox_value_truthy`, `lox_runtime_error`, `lox_alloc_closure`,
+  `lox_alloc_cell`, `lox_cell_get`, `lox_cell_set`, `lox_string_concat`,
+  `lox_string_equal`, `lox_alloc_class`, `lox_class_add_method`,
+  `lox_alloc_instance`, `lox_instance_get_property`, `lox_instance_set_field`,
+  `lox_class_find_method`, `lox_bind_method`, `lox_clock`
 
 #### `src/codegen/compiler.rs`
 
 - `CodeGen`: Main code generator struct wrapping inkwell Context/Module/Builder
 - `compile(program) -> Result<String>`: Entry point, returns LLVM IR text
-- Compiles: literals, arithmetic, comparisons, unary ops, print, global vars
+- Full Lox language support: literals, arithmetic, comparisons, unary ops,
+  print, global/local variables, control flow, functions, closures, classes,
+  inheritance, `this`, `super`, runtime type checks with line numbers
 
 #### `runtime/lox_runtime.c`
 
 - C runtime library loaded via `lli -load`
-- Implements: printing, global variable hash map, truthiness, error reporting
+- Implements: printing, global variable hash map, truthiness, error reporting,
+  closure allocation, heap cells for captured variables, string concatenation
+  and equality, class/instance allocation, field get/set, method lookup
+  (walks superclass chain), method binding, `clock()` native function
 - Number formatting matches Lox semantics (integers without `.0`)
 
-### Current Scope (Phase 1)
+### Feature Coverage
 
-Supports: number/bool/nil/string literals, arithmetic (`+`, `-`, `*`, `/`),
-comparisons (`<`, `<=`, `>`, `>=`, `==`, `!=`), unary (`-`, `!`), `print`,
-global variables. Not yet: control flow, local variables, functions, closures,
-classes.
+The LLVM codegen supports the full Lox language: literals, arithmetic, string
+operations, control flow (`if`/`else`, `while`, `for`, `and`/`or`), local and
+global variables with lexical scoping, functions, closures with captured
+variables, classes, inheritance, `this`, `super`, `init` constructors, and
+runtime error reporting with line numbers.
 
 ### Running LLVM Output
 
@@ -1382,11 +1401,12 @@ src/
 └── codegen/             # Phase 5: LLVM IR compilation
     ├── mod.rs          # Public compile() API
     ├── compiler.rs     # CodeGen struct, AST → LLVM IR
+    ├── capture.rs      # Capture analysis (variables crossing function boundaries)
     ├── types.rs        # LoxValue type ({i8, i64} tagged union)
     └── runtime.rs      # External runtime function declarations
 
 runtime/                 # C runtime for LLVM-compiled programs
-├── lox_runtime.c       # print, globals, truthiness, error handling
+├── lox_runtime.c       # print, globals, truthiness, closures, strings, classes
 ├── lox_runtime.h       # Header with LoxValue struct and tag constants
 └── Makefile            # Build liblox_runtime.so
 ```
@@ -1395,7 +1415,7 @@ runtime/                 # C runtime for LLVM-compiled programs
 
 ## Testing Strategy
 
-### Unit Tests (257 tests)
+### Unit Tests (294 tests)
 
 **By module:**
 
@@ -1408,7 +1428,8 @@ runtime/                 # C runtime for LLVM-compiled programs
 - `vm/chunk.rs` (30 tests): Bytecode operations, serialization
 - `vm/compiler.rs` (50 tests): Compilation correctness
 - `vm/vm.rs` (70 tests): VM execution, all opcodes
-- `error.rs` (3 tests): Error trait implementations
+- `codegen/compiler.rs` (52 tests): LLVM IR generation, type checks
+- `error.rs` (14 tests): Error trait implementations
 - `repl.rs` (1 test): Bare expression detection
 
 **Test helpers:**
@@ -1420,23 +1441,28 @@ fn run_vm(source: &str) -> Vec<String>
 fn resolve(source: &str) -> Result<HashMap<ExprId, usize>, Vec<LoxError>>
 ```
 
-### Integration Tests (14 tests)
+### Integration Tests (34 tests)
 
 **Fixture-based testing:**
 
 ```
 tests/
-├── interpreter_tests.rs    # Tree-walk interpreter
-└── vm_tests.rs             # Bytecode VM
+├── interpreter_tests.rs    # Tree-walk interpreter (9 tests)
+├── vm_tests.rs             # Bytecode VM (12 tests)
+└── llvm_tests.rs           # LLVM IR codegen (13 tests)
 
 fixtures/
 ├── hello.lox               # Hello world
 ├── arithmetic.lox          # Math operations
-├── scoping.lox            # Variable scoping
-├── classes.lox            # OOP features
-├── counter.lox            # Closures
-├── fibonacci.lox          # Recursion
-└── *.expected             # Expected output files
+├── scoping.lox             # Variable scoping
+├── control_flow.lox        # If/else, while, for, logical operators
+├── classes.lox             # OOP features
+├── counter.lox             # Closures
+├── fib.lox                 # Recursion
+├── strings.lox             # String operations
+├── error_*.lox             # Runtime error test cases
+├── *.expected              # Expected stdout for success fixtures
+└── *.expected_error        # Expected stderr for error fixtures
 ```
 
 **Test execution:**
@@ -1504,6 +1530,7 @@ winnow = "0.7"          # Parser combinators
 serde = "1.0"           # Serialization
 serde_json = "1.0"      # JSON AST output
 rmp-serde = "1.3"       # MessagePack bytecode serialization
+inkwell = "0.8"         # LLVM 21 bindings (feature: llvm21-1)
 ```
 
 ### Dev Dependencies
@@ -1512,43 +1539,22 @@ rmp-serde = "1.3"       # MessagePack bytecode serialization
 rstest = "0.26"         # Parameterized testing
 ```
 
-### Future Dependencies
-
-```toml
-inkwell = "0.x"         # LLVM bindings (Phase 7)
-```
-
 ---
 
 ## Future Work
-
-### Planned Features (Phase 7)
-
-**LLVM IR Compilation:**
-
-- Emit LLVM IR using `inkwell` crate
-- Compile to native code via LLVM backend
-- Support for:
-    - Arithmetic and basic operations
-    - Functions (no closures initially)
-    - Type-specific optimizations
-
-**Challenges:**
-
-- Representing Lox's dynamic types in LLVM
-- Implementing garbage collection
-- Closure conversion for nested functions
-- Runtime support library for string operations
 
 ### Potential Improvements
 
 1. **Constant pool optimization:** Deduplicate constants
 2. **Jump optimization:** Use 8-bit jumps for short distances
 3. **Invoke optimization:** Extend to more property access patterns
-4. **Better line tracking:** Keep source text for error messages
-5. ~~**Bytecode format:** Binary format instead of JSON~~ (done — uses MessagePack with magic header)
+4. ~~**Bytecode format:** Binary format instead of JSON~~ (done — uses MessagePack with magic header)
+5. ~~**LLVM IR compilation**~~ (done — full Lox language support via `inkwell`)
 6. **REPL improvements:** Multi-line input, syntax highlighting
 7. **Debugger:** Step through bytecode, inspect stack
+8. **LLVM native compilation:** Compile `.ll` to native binary via `clang`
+9. **Garbage collection:** The C runtime currently leaks all heap allocations
+10. **Stack overflow detection:** No depth counter for deep recursion
 
 ---
 

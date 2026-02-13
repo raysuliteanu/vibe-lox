@@ -1,0 +1,3 @@
+// Test calling a non-callable value
+var x = 42;
+x();

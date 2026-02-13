@@ -1,0 +1,2 @@
+// Test runtime type errors in LLVM codegen
+print -"hello";

@@ -14,11 +14,11 @@ use crate::interpreter::resolver::Resolver;
 /// Compile a Lox AST to LLVM IR and return the IR as a string.
 ///
 /// Runs the resolver and capture analysis, then generates LLVM IR.
-pub fn compile(program: &Program) -> Result<String> {
+pub fn compile(program: &Program, source: &str) -> Result<String> {
     let locals = resolve(program)?;
     let captures = capture::analyze_captures(program);
     let context = Context::create();
-    let codegen = compiler::CodeGen::new(&context, "lox", locals, captures);
+    let codegen = compiler::CodeGen::new(&context, "lox", locals, captures, source);
     codegen.compile(program)
 }
 

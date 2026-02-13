@@ -250,7 +250,7 @@ fn main() -> Result<()> {
         let program = LoxParser::new(tokens)
             .parse()
             .map_err(|e| report_compile_errors(e, &filename, &source))?;
-        let ir = vibe_lox::codegen::compile(&program).context("compile to LLVM IR")?;
+        let ir = vibe_lox::codegen::compile(&program, &source).context("compile to LLVM IR")?;
         std::fs::write(&output_path, &ir)
             .with_context(|| format!("write LLVM IR to '{}'", output_path.display()))?;
         println!("Wrote LLVM IR to {}", output_path.display());

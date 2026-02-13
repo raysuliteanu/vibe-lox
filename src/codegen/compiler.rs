@@ -54,6 +54,8 @@ pub struct CodeGen<'ctx> {
     current_lox_fn: String,
     /// For return statements: alloca for the return value and the exit block.
     return_target: Option<(PointerValue<'ctx>, inkwell::basic_block::BasicBlock<'ctx>)>,
+    /// Source text of the program, used to compute line numbers from spans.
+    source: String,
 }
 
 impl<'ctx> CodeGen<'ctx> {
@@ -62,6 +64,7 @@ impl<'ctx> CodeGen<'ctx> {
         module_name: &str,
         locals: HashMap<ExprId, usize>,
         captures: CaptureInfo,
+        source: &str,
     ) -> Self {
         let module = context.create_module(module_name);
         let builder = context.create_builder();
@@ -79,6 +82,7 @@ impl<'ctx> CodeGen<'ctx> {
             captures,
             current_lox_fn: String::new(),
             return_target: None,
+            source: source.to_string(),
         }
     }
 
@@ -975,6 +979,7 @@ impl<'ctx> CodeGen<'ctx> {
         let current_fn = self.current_fn.expect("must be inside a function");
         let callee = self.compile_expr(&call.callee)?;
         let lv_type = self.lox_value.llvm_type();
+        let line = self.line_from_offset(call.span.offset);
 
         // Evaluate arguments upfront (needed for both function and class calls)
         let mut arg_vals = Vec::new();
@@ -982,16 +987,29 @@ impl<'ctx> CodeGen<'ctx> {
             arg_vals.push(self.compile_expr(arg)?);
         }
 
-        // Check if callee is a class (TAG_CLASS) or function (TAG_FUNCTION)
+        // Check if callee is callable (TAG_FUNCTION or TAG_CLASS)
         let callee_tag = self.lox_value.extract_tag(&self.builder, callee);
+        let fn_tag = self
+            .context
+            .i8_type()
+            .const_int(u64::from(super::types::TAG_FUNCTION), false);
         let class_tag = self
             .context
             .i8_type()
             .const_int(u64::from(super::types::TAG_CLASS), false);
+        let is_fn = self
+            .builder
+            .build_int_compare(inkwell::IntPredicate::EQ, callee_tag, fn_tag, "is_fn")
+            .expect("check if function call");
         let is_class = self
             .builder
             .build_int_compare(inkwell::IntPredicate::EQ, callee_tag, class_tag, "is_class")
             .expect("check if class call");
+        let is_callable = self
+            .builder
+            .build_or(is_fn, is_class, "is_callable")
+            .expect("check callable");
+        self.emit_type_check(is_callable, "can only call functions and classes", line);
 
         let fn_call_bb = self.context.append_basic_block(current_fn, "call_fn");
         let class_call_bb = self.context.append_basic_block(current_fn, "call_class");
@@ -1003,7 +1021,7 @@ impl<'ctx> CodeGen<'ctx> {
 
         // --- Function call path (existing logic) ---
         self.builder.position_at_end(fn_call_bb);
-        let fn_result = self.emit_closure_call(callee, &arg_vals)?;
+        let fn_result = self.emit_closure_call(callee, &arg_vals, line)?;
         let fn_exit_bb = self.builder.get_insert_block().expect("have block");
         self.builder
             .build_unconditional_branch(call_merge_bb)
@@ -1011,7 +1029,7 @@ impl<'ctx> CodeGen<'ctx> {
 
         // --- Class instantiation path ---
         self.builder.position_at_end(class_call_bb);
-        let class_result = self.emit_class_instantiation(callee, &arg_vals)?;
+        let class_result = self.emit_class_instantiation(callee, &arg_vals, line)?;
         let class_exit_bb = self.builder.get_insert_block().expect("have block");
         self.builder
             .build_unconditional_branch(call_merge_bb)
@@ -1032,8 +1050,10 @@ impl<'ctx> CodeGen<'ctx> {
         &mut self,
         callee: StructValue<'ctx>,
         args: &[StructValue<'ctx>],
+        line: u32,
     ) -> anyhow::Result<StructValue<'ctx>> {
         let ptr_type = self.context.ptr_type(AddressSpace::default());
+        let i32_type = self.context.i32_type();
         let lv_type = self.lox_value.llvm_type();
 
         let closure_ptr_int = self.lox_value.extract_payload(&self.builder, callee);
@@ -1041,6 +1061,23 @@ impl<'ctx> CodeGen<'ctx> {
             .builder
             .build_int_to_ptr(closure_ptr_int, ptr_type, "closure_ptr")
             .expect("int to closure ptr");
+
+        // Check arity
+        let arity_ptr = self
+            .builder
+            .build_struct_gep(self.closure_llvm_type(), closure_ptr, 1, "arity_ptr")
+            .expect("GEP to arity");
+        let arity = self
+            .builder
+            .build_load(i32_type, arity_ptr, "arity")
+            .expect("load arity")
+            .into_int_value();
+        let expected_args = i32_type.const_int(args.len() as u64, false);
+        let arity_ok = self
+            .builder
+            .build_int_compare(inkwell::IntPredicate::EQ, arity, expected_args, "arity_ok")
+            .expect("check arity");
+        self.emit_type_check(arity_ok, "wrong number of arguments", line);
 
         let fn_ptr_ptr = self
             .builder
@@ -1088,6 +1125,7 @@ impl<'ctx> CodeGen<'ctx> {
         &mut self,
         callee: StructValue<'ctx>,
         args: &[StructValue<'ctx>],
+        line: u32,
     ) -> anyhow::Result<StructValue<'ctx>> {
         let current_fn = self.current_fn.expect("inside a function");
         let ptr_type = self.context.ptr_type(AddressSpace::default());
@@ -1143,10 +1181,11 @@ impl<'ctx> CodeGen<'ctx> {
             .expect("check init null");
 
         let call_init_bb = self.context.append_basic_block(current_fn, "call_init");
-        let skip_init_bb = self.context.append_basic_block(current_fn, "skip_init");
+        let no_init_bb = self.context.append_basic_block(current_fn, "no_init");
+        let inst_done_bb = self.context.append_basic_block(current_fn, "inst_done");
 
         self.builder
-            .build_conditional_branch(has_init, call_init_bb, skip_init_bb)
+            .build_conditional_branch(has_init, call_init_bb, no_init_bb)
             .expect("branch on init check");
 
         // Call init: bind to instance and call with args
@@ -1163,14 +1202,23 @@ impl<'ctx> CodeGen<'ctx> {
             .unwrap_basic()
             .into_struct_value();
 
-        // Call the bound init as a regular closure
-        self.emit_closure_call(bound_init, args)?;
+        // Call the bound init as a regular closure (arity checked inside)
+        self.emit_closure_call(bound_init, args, line)?;
         self.builder
-            .build_unconditional_branch(skip_init_bb)
-            .expect("branch to skip init");
+            .build_unconditional_branch(inst_done_bb)
+            .expect("branch to inst done from init");
 
-        // Return the instance (not the init return value)
-        self.builder.position_at_end(skip_init_bb);
+        // No-init path: error if arguments were passed
+        self.builder.position_at_end(no_init_bb);
+        if !args.is_empty() {
+            self.emit_runtime_error("wrong number of arguments", line);
+        } else {
+            self.builder
+                .build_unconditional_branch(inst_done_bb)
+                .expect("branch to inst done from no-init");
+        }
+
+        self.builder.position_at_end(inst_done_bb);
         Ok(instance)
     }
 
@@ -1202,6 +1250,8 @@ impl<'ctx> CodeGen<'ctx> {
 
     fn compile_get(&mut self, get: &GetExpr) -> anyhow::Result<StructValue<'ctx>> {
         let object = self.compile_expr(&get.object)?;
+        let line = self.line_from_offset(get.span.offset);
+        self.check_is_instance(object, "only instances have properties", line);
         let (name_ptr, name_len) = self.build_string_constant(&get.name);
         let result = self
             .builder
@@ -1219,6 +1269,8 @@ impl<'ctx> CodeGen<'ctx> {
 
     fn compile_set(&mut self, set: &SetExpr) -> anyhow::Result<StructValue<'ctx>> {
         let object = self.compile_expr(&set.object)?;
+        let line = self.line_from_offset(set.span.offset);
+        self.check_is_instance(object, "only instances have fields", line);
         let value = self.compile_expr(&set.value)?;
         let (name_ptr, name_len) = self.build_string_constant(&set.name);
         self.builder
@@ -1443,16 +1495,17 @@ impl<'ctx> CodeGen<'ctx> {
     fn compile_binary(&mut self, bin: &BinaryExpr) -> anyhow::Result<StructValue<'ctx>> {
         let left = self.compile_expr(&bin.left)?;
         let right = self.compile_expr(&bin.right)?;
+        let line = self.line_from_offset(bin.span.offset);
 
         match bin.operator {
-            BinaryOp::Add => self.compile_add(left, right),
-            BinaryOp::Subtract => self.compile_numeric_binop(left, right, "sub"),
-            BinaryOp::Multiply => self.compile_numeric_binop(left, right, "mul"),
-            BinaryOp::Divide => self.compile_numeric_binop(left, right, "div"),
-            BinaryOp::Less => self.compile_comparison(left, right, "lt"),
-            BinaryOp::LessEqual => self.compile_comparison(left, right, "le"),
-            BinaryOp::Greater => self.compile_comparison(left, right, "gt"),
-            BinaryOp::GreaterEqual => self.compile_comparison(left, right, "ge"),
+            BinaryOp::Add => self.compile_add(left, right, line),
+            BinaryOp::Subtract => self.compile_numeric_binop(left, right, "sub", line),
+            BinaryOp::Multiply => self.compile_numeric_binop(left, right, "mul", line),
+            BinaryOp::Divide => self.compile_numeric_binop(left, right, "div", line),
+            BinaryOp::Less => self.compile_comparison(left, right, "lt", line),
+            BinaryOp::LessEqual => self.compile_comparison(left, right, "le", line),
+            BinaryOp::Greater => self.compile_comparison(left, right, "gt", line),
+            BinaryOp::GreaterEqual => self.compile_comparison(left, right, "ge", line),
             BinaryOp::Equal => self.compile_equality(left, right, false),
             BinaryOp::NotEqual => self.compile_equality(left, right, true),
         }
@@ -1462,28 +1515,46 @@ impl<'ctx> CodeGen<'ctx> {
         &mut self,
         left: StructValue<'ctx>,
         right: StructValue<'ctx>,
+        line: u32,
     ) -> anyhow::Result<StructValue<'ctx>> {
         let current_fn = self.current_fn.expect("must be inside a function");
         let left_tag = self.lox_value.extract_tag(&self.builder, left);
+        let number_tag = self
+            .context
+            .i8_type()
+            .const_int(u64::from(super::types::TAG_NUMBER), false);
         let string_tag = self
             .context
             .i8_type()
             .const_int(u64::from(super::types::TAG_STRING), false);
-        let is_string = self
+        let is_number = self
             .builder
-            .build_int_compare(inkwell::IntPredicate::EQ, left_tag, string_tag, "is_str")
-            .expect("compare tag to TAG_STRING");
+            .build_int_compare(inkwell::IntPredicate::EQ, left_tag, number_tag, "is_num")
+            .expect("compare tag to TAG_NUMBER");
 
         let num_bb = self.context.append_basic_block(current_fn, "add_num");
+        let check_str_bb = self.context.append_basic_block(current_fn, "add_check_str");
         let str_bb = self.context.append_basic_block(current_fn, "add_str");
+        let error_bb = self.context.append_basic_block(current_fn, "add_error");
         let merge_bb = self.context.append_basic_block(current_fn, "add_merge");
 
         self.builder
-            .build_conditional_branch(is_string, str_bb, num_bb)
-            .expect("branch on add type");
+            .build_conditional_branch(is_number, num_bb, check_str_bb)
+            .expect("branch on add type num");
 
-        // Number addition
+        // Number addition — also check right operand
         self.builder.position_at_end(num_bb);
+        let right_tag = self.lox_value.extract_tag(&self.builder, right);
+        let right_is_number = self
+            .builder
+            .build_int_compare(inkwell::IntPredicate::EQ, right_tag, number_tag, "r_is_num")
+            .expect("check right is number");
+        self.emit_type_check(
+            right_is_number,
+            "operands must be two numbers or two strings",
+            line,
+        );
+
         let lhs = self.lox_value.extract_number(&self.builder, left);
         let rhs = self.lox_value.extract_number(&self.builder, right);
         let num_result = self
@@ -1503,8 +1574,34 @@ impl<'ctx> CodeGen<'ctx> {
             .build_unconditional_branch(merge_bb)
             .expect("branch to merge from num add");
 
-        // String concatenation
+        // Check if left is string
+        self.builder.position_at_end(check_str_bb);
+        let is_string = self
+            .builder
+            .build_int_compare(inkwell::IntPredicate::EQ, left_tag, string_tag, "is_str")
+            .expect("compare tag to TAG_STRING");
+        self.builder
+            .build_conditional_branch(is_string, str_bb, error_bb)
+            .expect("branch on string check");
+
+        // String concatenation — also check right operand
         self.builder.position_at_end(str_bb);
+        let right_tag_s = self.lox_value.extract_tag(&self.builder, right);
+        let right_is_string = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                right_tag_s,
+                string_tag,
+                "r_is_str",
+            )
+            .expect("check right is string");
+        self.emit_type_check(
+            right_is_string,
+            "operands must be two numbers or two strings",
+            line,
+        );
+
         let str_val = self
             .builder
             .build_call(
@@ -1521,6 +1618,10 @@ impl<'ctx> CodeGen<'ctx> {
             .build_unconditional_branch(merge_bb)
             .expect("branch to merge from str concat");
 
+        // Error path: neither number nor string
+        self.builder.position_at_end(error_bb);
+        self.emit_runtime_error("operands must be two numbers or two strings", line);
+
         // Merge
         self.builder.position_at_end(merge_bb);
         let phi = self
@@ -1536,7 +1637,9 @@ impl<'ctx> CodeGen<'ctx> {
         left: StructValue<'ctx>,
         right: StructValue<'ctx>,
         op_name: &str,
+        line: u32,
     ) -> anyhow::Result<StructValue<'ctx>> {
+        self.check_both_numbers(left, right, line);
         let lhs = self.lox_value.extract_number(&self.builder, left);
         let rhs = self.lox_value.extract_number(&self.builder, right);
 
@@ -1569,7 +1672,9 @@ impl<'ctx> CodeGen<'ctx> {
         left: StructValue<'ctx>,
         right: StructValue<'ctx>,
         cmp_name: &str,
+        line: u32,
     ) -> anyhow::Result<StructValue<'ctx>> {
+        self.check_both_numbers(left, right, line);
         let lhs = self.lox_value.extract_number(&self.builder, left);
         let rhs = self.lox_value.extract_number(&self.builder, right);
 
@@ -1693,6 +1798,18 @@ impl<'ctx> CodeGen<'ctx> {
         let operand = self.compile_expr(&un.operand)?;
         match un.operator {
             UnaryOp::Negate => {
+                let line = self.line_from_offset(un.span.offset);
+                let tag = self.lox_value.extract_tag(&self.builder, operand);
+                let number_tag = self
+                    .context
+                    .i8_type()
+                    .const_int(u64::from(super::types::TAG_NUMBER), false);
+                let is_num = self
+                    .builder
+                    .build_int_compare(inkwell::IntPredicate::EQ, tag, number_tag, "is_num")
+                    .expect("check operand is number");
+                self.emit_type_check(is_num, "operand must be a number", line);
+
                 let num = self.lox_value.extract_number(&self.builder, operand);
                 let negated = self.builder.build_float_neg(num, "neg").expect("float neg");
                 let payload = self
@@ -1918,6 +2035,99 @@ impl<'ctx> CodeGen<'ctx> {
         let len = self.context.i64_type().const_int(s.len() as u64, false);
         (global.as_pointer_value().into(), len.into())
     }
+
+    // --- Runtime type checks ---
+
+    /// Emit a check that both operands have TAG_NUMBER, emitting a runtime
+    /// error with the given line if not.
+    fn check_both_numbers(&mut self, left: StructValue<'ctx>, right: StructValue<'ctx>, line: u32) {
+        let number_tag = self
+            .context
+            .i8_type()
+            .const_int(u64::from(super::types::TAG_NUMBER), false);
+        let left_tag = self.lox_value.extract_tag(&self.builder, left);
+        let right_tag = self.lox_value.extract_tag(&self.builder, right);
+        let left_ok = self
+            .builder
+            .build_int_compare(inkwell::IntPredicate::EQ, left_tag, number_tag, "l_num")
+            .expect("check left is number");
+        let right_ok = self
+            .builder
+            .build_int_compare(inkwell::IntPredicate::EQ, right_tag, number_tag, "r_num")
+            .expect("check right is number");
+        let both_ok = self
+            .builder
+            .build_and(left_ok, right_ok, "both_num")
+            .expect("and both number checks");
+        self.emit_type_check(both_ok, "operands must be numbers", line);
+    }
+
+    /// Emit a check that the value has TAG_INSTANCE, emitting a runtime
+    /// error with the given message and line if not.
+    fn check_is_instance(&mut self, value: StructValue<'ctx>, error_msg: &str, line: u32) {
+        let instance_tag = self
+            .context
+            .i8_type()
+            .const_int(u64::from(super::types::TAG_INSTANCE), false);
+        let tag = self.lox_value.extract_tag(&self.builder, value);
+        let is_instance = self
+            .builder
+            .build_int_compare(inkwell::IntPredicate::EQ, tag, instance_tag, "is_inst")
+            .expect("check is instance");
+        self.emit_type_check(is_instance, error_msg, line);
+    }
+
+    // --- Runtime error emission ---
+
+    /// Convert a byte offset in the source to a 1-based line number.
+    fn line_from_offset(&self, offset: usize) -> u32 {
+        let clamped = offset.min(self.source.len());
+        self.source[..clamped]
+            .chars()
+            .filter(|&c| c == '\n')
+            .count() as u32
+            + 1
+    }
+
+    /// Emit a call to `lox_runtime_error(message, message_len, line)` which
+    /// prints an error and exits the program. Used for type errors, arity
+    /// mismatches, and other runtime checks.
+    fn emit_runtime_error(&mut self, message: &str, line: u32) {
+        let (msg_ptr, msg_len) = self.build_string_constant(message);
+        let line_val = self.context.i32_type().const_int(u64::from(line), false);
+        self.builder
+            .build_call(
+                self.runtime.lox_runtime_error,
+                &[msg_ptr.into(), msg_len.into(), line_val.into()],
+                "",
+            )
+            .expect("call lox_runtime_error");
+        self.builder
+            .build_unreachable()
+            .expect("unreachable after runtime error");
+    }
+
+    /// Emit a runtime type check: if the condition is false, emit a runtime
+    /// error. Returns the "ok" basic block for the caller to continue in.
+    fn emit_type_check(
+        &mut self,
+        condition: inkwell::values::IntValue<'ctx>,
+        error_message: &str,
+        line: u32,
+    ) {
+        let current_fn = self.current_fn.expect("must be inside a function");
+        let error_bb = self.context.append_basic_block(current_fn, "type_error");
+        let ok_bb = self.context.append_basic_block(current_fn, "type_ok");
+
+        self.builder
+            .build_conditional_branch(condition, ok_bb, error_bb)
+            .expect("branch on type check");
+
+        self.builder.position_at_end(error_bb);
+        self.emit_runtime_error(error_message, line);
+
+        self.builder.position_at_end(ok_bb);
+    }
 }
 
 #[cfg(test)]
@@ -1933,7 +2143,7 @@ mod tests {
         let locals = Resolver::new().resolve(&program).expect("resolve succeeds");
         let captures = super::super::capture::analyze_captures(&program);
         let context = Context::create();
-        let codegen = CodeGen::new(&context, "test", locals, captures);
+        let codegen = CodeGen::new(&context, "test", locals, captures, source);
         codegen.compile(&program).expect("compile succeeds")
     }
 
@@ -2388,6 +2598,60 @@ mod tests {
         assert!(
             ir.contains("lox_bind_method"),
             "super method should be bound"
+        );
+    }
+
+    #[test]
+    fn type_check_negate() {
+        let ir = compile_to_ir("print -42;");
+        assert!(
+            ir.contains("lox_runtime_error"),
+            "negate should emit type check"
+        );
+    }
+
+    #[test]
+    fn type_check_arithmetic() {
+        let ir = compile_to_ir("print 1 - 2;");
+        assert!(
+            ir.contains("lox_runtime_error"),
+            "arithmetic should emit type check"
+        );
+    }
+
+    #[test]
+    fn type_check_comparison() {
+        let ir = compile_to_ir("print 1 < 2;");
+        assert!(
+            ir.contains("lox_runtime_error"),
+            "comparison should emit type check"
+        );
+    }
+
+    #[test]
+    fn type_check_add() {
+        let ir = compile_to_ir("print 1 + 2;");
+        assert!(
+            ir.contains("lox_runtime_error"),
+            "add should emit type check for invalid types"
+        );
+    }
+
+    #[test]
+    fn callable_check() {
+        let ir = compile_to_ir("fun f() {} f();");
+        assert!(
+            ir.contains("lox_runtime_error"),
+            "call should emit callable check"
+        );
+    }
+
+    #[test]
+    fn instance_property_check() {
+        let ir = compile_to_ir("class A {} var a = A(); print a.x;");
+        assert!(
+            ir.contains("lox_runtime_error"),
+            "get property should emit instance check"
         );
     }
 }
