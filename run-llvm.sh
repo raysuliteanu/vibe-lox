@@ -2,8 +2,11 @@
 set -euo pipefail
 
 usage() {
-    echo "Usage: $0 <file.lox>"
-    echo "Compiles a Lox file to LLVM IR and runs it via lli."
+    echo "Usage: $0 <program>"
+    echo "Runs a Lox program via lli."
+    echo ""
+    echo "Accepts a base name (without extension), a .ll file, or a .lox file."
+    echo "If given a base name, looks for <program>.ll first, then <program>.lox."
     exit 1
 }
 
@@ -12,29 +15,28 @@ if [[ $# -ne 1 ]]; then
 fi
 
 input="$1"
-
-if [[ ! -f "$input" ]]; then
-    echo "Error: file not found: $input" >&2
-    exit 1
-fi
-
-if [[ "$input" != *.lox ]]; then
-    echo "Error: expected a .lox file, got: $input" >&2
-    exit 1
-fi
-
-ll_file="${input%.lox}.ll"
 script_dir="$(cd "$(dirname "$0")" && pwd)"
 runtime_so="$script_dir/runtime/liblox_runtime.so"
 
-# Ensure the runtime .so is built
-if [[ ! -f "$runtime_so" ]]; then
-    echo "Runtime not found, running cargo build..." >&2
-    cargo build --manifest-path "$script_dir/Cargo.toml"
-fi
+# Strip any .ll or .lox extension to get the base name
+base="${input%.ll}"
+base="${base%.lox}"
 
-# Compile to LLVM IR
-cargo run --manifest-path "$script_dir/Cargo.toml" -- --compile-llvm "$input"
+ll_file="${base}.ll"
+lox_file="${base}.lox"
+
+if [[ -f "$ll_file" ]]; then
+    : # already compiled
+elif [[ -f "$lox_file" ]]; then
+    if [[ ! -f "$runtime_so" ]]; then
+        cargo -q build --manifest-path "$script_dir/Cargo.toml" >&2
+    fi
+
+    cargo -q run --manifest-path "$script_dir/Cargo.toml" -- -q --compile-llvm "$lox_file" >&2
+else
+    echo "Error: neither $ll_file nor $lox_file found." >&2
+    exit 1
+fi
 
 # Run via lli
 lli -load "$runtime_so" "$ll_file"
