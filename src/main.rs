@@ -36,6 +36,10 @@ struct Cli {
     #[arg(long)]
     compile_llvm: bool,
 
+    /// Output file path (overrides default for --compile-bytecode / --compile-llvm)
+    #[arg(short = 'o', long = "output")]
+    output: Option<PathBuf>,
+
     /// Suppress informational output
     #[arg(short = 'q')]
     quiet: bool,
@@ -170,6 +174,10 @@ fn main() -> Result<()> {
         bail!("file not found: '{}'", path.display());
     }
 
+    if cli.output.is_some() && !cli.compile_bytecode && !cli.compile_llvm {
+        bail!("--output/-o can only be used with --compile-bytecode or --compile-llvm");
+    }
+
     if cli.dump_tokens {
         let source = read_source(&cli)?;
         let filename = get_filename(&cli);
@@ -234,10 +242,16 @@ fn main() -> Result<()> {
             .file
             .as_ref()
             .context("--compile-bytecode requires an input file")?;
-        let output_path = input_path.with_extension("blox");
+        let output_path = cli
+            .output
+            .clone()
+            .unwrap_or_else(|| input_path.with_extension("blox"));
         let source = read_source(&cli)?;
         let compiled = compile_source(&source)?;
         save_chunk(&compiled, &output_path)?;
+        if !cli.quiet {
+            println!("Wrote bytecode to {}", output_path.display());
+        }
         return Ok(());
     }
 
@@ -246,7 +260,10 @@ fn main() -> Result<()> {
             .file
             .as_ref()
             .context("--compile-llvm requires an input file")?;
-        let output_path = input_path.with_extension("ll");
+        let output_path = cli
+            .output
+            .clone()
+            .unwrap_or_else(|| input_path.with_extension("ll"));
         let source = read_source(&cli)?;
         let filename = get_filename(&cli);
         let tokens =
@@ -267,11 +284,17 @@ fn main() -> Result<()> {
         Some(ref path) => {
             // Autodetect: if the file starts with the "blox" magic, run via VM
             if is_bytecode_file(path)? {
+                if !cli.quiet {
+                    println!("Running VM for {}", path.display());
+                }
                 let compiled = load_chunk(path)?;
                 let mut vm = vibe_lox::vm::vm::Vm::new();
                 vm.interpret(compiled)
                     .map_err(|e| report_runtime_error(&e, None))?;
             } else {
+                if !cli.quiet {
+                    println!("Interpreting {}", path.display());
+                }
                 let source = read_source(&cli)?;
                 let filename = get_filename(&cli);
                 run_source(&source, &filename)?;

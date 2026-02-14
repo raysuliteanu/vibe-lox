@@ -16,6 +16,7 @@ cargo fmt                      # Fix formatting
 cargo run -- <file.lox>        # Interpret a Lox file (tree-walk, default)
 cargo run -- <file.blox>       # Autodetect bytecode and run via VM
 cargo run -- --compile-llvm <file.lox> # Compile to LLVM IR (.ll file)
+cargo run -- --compile-llvm -o out.ll <file.lox>  # Compile to custom output path
 lli -load runtime/liblox_runtime.so <file.ll>  # Run compiled LLVM IR
 ./run-llvm.sh <file.lox>              # Compile and run via lli (convenience)
 cargo run -- --dump-tokens <f> # Show tokens and stop
