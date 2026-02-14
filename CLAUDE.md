@@ -19,6 +19,8 @@ cargo run -- --compile-llvm <file.lox> # Compile to LLVM IR (.ll file)
 cargo run -- --compile-llvm -o out.ll <file.lox>  # Compile to custom output path
 lli -load runtime/liblox_runtime.so <file.ll>  # Run compiled LLVM IR
 ./run-llvm.sh <file.lox>              # Compile and run via lli (convenience)
+cargo run -- --compile <file.lox>          # Compile to native executable
+cargo run -- --compile -o out <file.lox>   # Compile with custom output path
 cargo run -- --dump-tokens <f> # Show tokens and stop
 cargo run -- --dump-ast <f>    # Show AST (S-expressions) and stop
 cargo run -- --compile-bytecode <file.lox>  # Compile and save bytecode to .blox

@@ -10,3 +10,4 @@
 ## Build system
 
 - Removed `runtime/Makefile` in favor of `build.rs` — the C runtime (`liblox_runtime.so`) is now built automatically during `cargo build`
+- `build.rs` also produces `runtime/lox_runtime.o` for static linking into native executables

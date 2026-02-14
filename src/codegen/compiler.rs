@@ -86,10 +86,16 @@ impl<'ctx> CodeGen<'ctx> {
         }
     }
 
-    /// Compile a Lox program to LLVM IR and return the IR as a string.
-    pub fn compile(mut self, program: &Program) -> anyhow::Result<String> {
+    /// Emit LLVM IR for a Lox program, returning the LLVM module.
+    pub fn emit(mut self, program: &Program) -> anyhow::Result<Module<'ctx>> {
         self.emit_main(program)?;
-        Ok(self.module.print_to_string().to_string())
+        Ok(self.module)
+    }
+
+    /// Compile a Lox program to LLVM IR and return the IR as a string.
+    pub fn compile(self, program: &Program) -> anyhow::Result<String> {
+        let module = self.emit(program)?;
+        Ok(module.print_to_string().to_string())
     }
 
     fn emit_main(&mut self, program: &Program) -> anyhow::Result<()> {

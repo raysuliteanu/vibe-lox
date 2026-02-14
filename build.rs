@@ -26,4 +26,19 @@ fn main() {
     if !status.success() {
         panic!("C compiler failed to build {}", output.display());
     }
+
+    // Also build a static object file for native linking
+    let obj_output = runtime_dir.join("lox_runtime.o");
+    let status = Command::new(&cc)
+        .args(["-Wall", "-Wextra", "-O2", "-fPIC", "-c", "-o"])
+        .arg(&obj_output)
+        .arg(&source)
+        .status()
+        .unwrap_or_else(|e| panic!("failed to run C compiler `{cc}`: {e}"));
+
+    if !status.success() {
+        panic!("C compiler failed to build {}", obj_output.display());
+    }
+
+    println!("cargo:rustc-env=LOX_RUNTIME_OBJ={}", obj_output.display());
 }

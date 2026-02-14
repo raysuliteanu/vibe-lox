@@ -36,7 +36,11 @@ struct Cli {
     #[arg(long)]
     compile_llvm: bool,
 
-    /// Output file path (overrides default for --compile-bytecode / --compile-llvm)
+    /// Compile to a native executable
+    #[arg(long, conflicts_with_all = ["compile_llvm", "compile_bytecode", "disassemble", "dump_tokens", "dump_ast"])]
+    compile: bool,
+
+    /// Output file path (overrides default for --compile-bytecode / --compile-llvm / --compile)
     #[arg(short = 'o', long = "output")]
     output: Option<PathBuf>,
 
@@ -174,8 +178,8 @@ fn main() -> Result<()> {
         bail!("file not found: '{}'", path.display());
     }
 
-    if cli.output.is_some() && !cli.compile_bytecode && !cli.compile_llvm {
-        bail!("--output/-o can only be used with --compile-bytecode or --compile-llvm");
+    if cli.output.is_some() && !cli.compile_bytecode && !cli.compile_llvm && !cli.compile {
+        bail!("--output/-o can only be used with --compile-bytecode, --compile-llvm, or --compile");
     }
 
     if cli.dump_tokens {
@@ -251,6 +255,36 @@ fn main() -> Result<()> {
         save_chunk(&compiled, &output_path)?;
         if !cli.quiet {
             println!("Wrote bytecode to {}", output_path.display());
+        }
+        return Ok(());
+    }
+
+    if cli.compile {
+        let input_path = cli
+            .file
+            .as_ref()
+            .context("--compile requires an input file")?;
+        if is_bytecode_file(input_path)? {
+            bail!("cannot compile .blox bytecode to a native executable; use a .lox source file");
+        }
+        let output_path = cli.output.clone().unwrap_or_else(|| {
+            let stem = input_path.file_stem().unwrap_or_default();
+            input_path.with_file_name(stem)
+        });
+        let source = read_source(&cli)?;
+        let filename = get_filename(&cli);
+        let tokens =
+            scanner::scan(&source).map_err(|e| report_compile_errors(e, &filename, &source))?;
+        let program = LoxParser::new(tokens)
+            .parse()
+            .map_err(|e| report_compile_errors(e, &filename, &source))?;
+        let context = inkwell::context::Context::create();
+        let module = vibe_lox::codegen::compile_to_module(&context, &program, &source)
+            .context("compile to LLVM module")?;
+        vibe_lox::codegen::native::compile_to_executable(&module, &output_path)
+            .context("compile to native executable")?;
+        if !cli.quiet {
+            println!("Compiled native executable: {}", output_path.display());
         }
         return Ok(());
     }
