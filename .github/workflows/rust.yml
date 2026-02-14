@@ -21,7 +21,7 @@ jobs:
         wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc
         echo "deb http://apt.llvm.org/$(lsb_release -cs)/ llvm-toolchain-$(lsb_release -cs)-21 main" | sudo tee /etc/apt/sources.list.d/llvm-21.list
         sudo apt-get update
-        sudo apt-get install -y llvm-21-dev gcc
+        sudo apt-get install -y llvm-21-dev libpolly-21-dev libzstd-dev libxml2-dev zlib1g-dev gcc
     - name: Set LLVM prefix
       run: echo "LLVM_SYS_211_PREFIX=/usr/lib/llvm-21" >> "$GITHUB_ENV"
     - name: Build
