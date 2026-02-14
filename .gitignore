@@ -5,6 +5,5 @@ tmp/
 .opencode/
 TEST_AND_QUALITY_PLAN.md
 *.ll
-runtime/liblox_runtime.so
 runtime/lox_runtime.o
 .idea/

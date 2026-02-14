@@ -16,7 +16,7 @@ fi
 
 input="$1"
 script_dir="$(cd "$(dirname "$0")" && pwd)"
-runtime_so="$script_dir/runtime/liblox_runtime.so"
+runtime_obj="$script_dir/runtime/lox_runtime.o"
 
 # Strip any .ll or .lox extension to get the base name
 base="${input%.ll}"
@@ -28,7 +28,7 @@ lox_file="${base}.lox"
 if [[ -f "$ll_file" ]]; then
     : # already compiled
 elif [[ -f "$lox_file" ]]; then
-    if [[ ! -f "$runtime_so" ]]; then
+    if [[ ! -f "$runtime_obj" ]]; then
         cargo -q build --manifest-path "$script_dir/Cargo.toml" >&2
     fi
 
@@ -39,4 +39,4 @@ else
 fi
 
 # Run via lli
-lli -load "$runtime_so" "$ll_file"
+lli --extra-object "$runtime_obj" "$ll_file"

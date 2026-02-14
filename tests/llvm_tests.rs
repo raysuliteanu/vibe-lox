@@ -9,14 +9,14 @@ fn run_llvm_fixture(fixture_name: &str) -> String {
     let ll_file = project_root
         .join("fixtures")
         .join(fixture_name.replace(".lox", ".ll"));
-    let runtime_lib = project_root.join("runtime/liblox_runtime.so");
+    let runtime_obj = project_root.join("runtime/lox_runtime.o");
 
     // Ensure tmp/ and runtime exist
     std::fs::create_dir_all(project_root.join("tmp")).expect("create tmp dir");
     assert!(
-        runtime_lib.exists(),
-        "runtime library not found at {}: run `make -C runtime` first",
-        runtime_lib.display()
+        runtime_obj.exists(),
+        "runtime object not found at {}: run `cargo build` first",
+        runtime_obj.display()
     );
 
     // Compile .lox → .ll
@@ -33,8 +33,8 @@ fn run_llvm_fixture(fixture_name: &str) -> String {
     // Run .ll via lli
     let run_output = Command::new("lli")
         .args([
-            "-load",
-            runtime_lib.to_str().unwrap(),
+            "--extra-object",
+            runtime_obj.to_str().unwrap(),
             ll_file.to_str().unwrap(),
         ])
         .output()
@@ -116,13 +116,13 @@ fn run_llvm_error_fixture(fixture_name: &str) -> String {
     let ll_file = project_root
         .join("fixtures")
         .join(fixture_name.replace(".lox", ".ll"));
-    let runtime_lib = project_root.join("runtime/liblox_runtime.so");
+    let runtime_obj = project_root.join("runtime/lox_runtime.o");
 
     std::fs::create_dir_all(project_root.join("tmp")).expect("create tmp dir");
     assert!(
-        runtime_lib.exists(),
-        "runtime library not found at {}: run `make -C runtime` first",
-        runtime_lib.display()
+        runtime_obj.exists(),
+        "runtime object not found at {}: run `cargo build` first",
+        runtime_obj.display()
     );
 
     let compile_output = Command::new(env!("CARGO_BIN_EXE_vibe-lox"))
@@ -137,8 +137,8 @@ fn run_llvm_error_fixture(fixture_name: &str) -> String {
 
     let run_output = Command::new("lli")
         .args([
-            "-load",
-            runtime_lib.to_str().unwrap(),
+            "--extra-object",
+            runtime_obj.to_str().unwrap(),
             ll_file.to_str().unwrap(),
         ])
         .output()

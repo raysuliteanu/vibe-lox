@@ -25,12 +25,12 @@ fn run_llvm(fixture_path: &str) -> Vec<String> {
     let project_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let lox_file = project_root.join(fixture_path);
     let ll_file = lox_file.with_extension("ll");
-    let runtime_lib = project_root.join("runtime/liblox_runtime.so");
+    let runtime_obj = project_root.join("runtime/lox_runtime.o");
 
     assert!(
-        runtime_lib.exists(),
-        "runtime library not found at {}: run `make -C runtime` first",
-        runtime_lib.display()
+        runtime_obj.exists(),
+        "runtime object not found at {}: run `cargo build` first",
+        runtime_obj.display()
     );
 
     let compile_output = Command::new(env!("CARGO_BIN_EXE_vibe-lox"))
@@ -45,8 +45,8 @@ fn run_llvm(fixture_path: &str) -> Vec<String> {
 
     let run_output = Command::new("lli")
         .args([
-            "-load",
-            runtime_lib.to_str().unwrap(),
+            "--extra-object",
+            runtime_obj.to_str().unwrap(),
             ll_file.to_str().unwrap(),
         ])
         .output()

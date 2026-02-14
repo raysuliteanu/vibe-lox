@@ -1069,7 +1069,7 @@ All Lox values are represented as a tagged union struct `{ i8, i64 }`:
 
 #### `runtime/lox_runtime.c`
 
-- C runtime library loaded via `lli -load`
+- C runtime library loaded via `lli --extra-object`
 - Implements: printing, global variable hash map, truthiness, error reporting,
   closure allocation, heap cells for captured variables, string concatenation
   and equality, class/instance allocation, field get/set, method lookup
@@ -1092,7 +1092,7 @@ make -C runtime
 
 # Compile to LLVM IR and run via lli
 cargo run -- --compile-llvm file.lox
-lli -load runtime/liblox_runtime.so file.ll
+lli --extra-object runtime/lox_runtime.o file.ll
 
 # Compile to native executable
 cargo run -- --compile file.lox         # produces ./file
@@ -1112,9 +1112,9 @@ ELF executable. The pipeline:
 3. **Linking** — invokes `gcc` (or `$CC`) to link the program object with
    `lox_runtime.o` (statically linked C runtime) and `-lm`
 
-The `build.rs` script compiles both `liblox_runtime.so` (for `lli`) and
-`lox_runtime.o` (for native linking). The object file path is exposed at
-compile time via `env!("LOX_RUNTIME_OBJ")`.
+The `build.rs` script compiles `lox_runtime.o`, used by both `lli --extra-object`
+and native linking. The object file path is exposed at compile time via
+`env!("LOX_RUNTIME_OBJ")`.
 
 Bytecode `.blox` files cannot be compiled to native executables because they
 discard AST structure and resolution data needed for LLVM IR generation.
@@ -1436,8 +1436,7 @@ src/
 
 runtime/                 # C runtime for LLVM-compiled programs
 ├── lox_runtime.c       # print, globals, truthiness, closures, strings, classes
-├── lox_runtime.h       # Header with LoxValue struct and tag constants
-└── Makefile            # Build liblox_runtime.so
+└── lox_runtime.h       # Header with LoxValue struct and tag constants
 ```
 
 ---
