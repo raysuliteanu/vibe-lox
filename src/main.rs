@@ -36,6 +36,10 @@ struct Cli {
     #[arg(long)]
     compile_llvm: bool,
 
+    /// Suppress informational output
+    #[arg(short = 'q')]
+    quiet: bool,
+
     /// Disassemble bytecode (from source or saved file) and print
     #[arg(long)]
     disassemble: bool,
@@ -253,7 +257,9 @@ fn main() -> Result<()> {
         let ir = vibe_lox::codegen::compile(&program, &source).context("compile to LLVM IR")?;
         std::fs::write(&output_path, &ir)
             .with_context(|| format!("write LLVM IR to '{}'", output_path.display()))?;
-        println!("Wrote LLVM IR to {}", output_path.display());
+        if !cli.quiet {
+            println!("Wrote LLVM IR to {}", output_path.display());
+        }
         return Ok(());
     }
 
