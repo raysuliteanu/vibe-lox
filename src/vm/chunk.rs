@@ -1,9 +1,10 @@
-use anyhow::{Result, bail};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// A bytecode instruction.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, strum::AsRefStr)]
+#[strum(serialize_all = "snake_case")]
 #[repr(u8)]
 pub enum OpCode {
     Constant,
@@ -78,6 +79,24 @@ pub enum Constant {
     },
 }
 
+impl Constant {
+    fn type_name(&self) -> &'static str {
+        match self {
+            Self::Number(_) => "Number",
+            Self::String(_) => "String",
+            Self::Function { .. } => "Function",
+        }
+    }
+
+    fn pool_value(&self) -> String {
+        match self {
+            Self::Number(n) => format!("{n}"),
+            Self::String(s) => format!("\"{s}\""),
+            Self::Function { name, .. } => name.clone(),
+        }
+    }
+}
+
 impl fmt::Display for Constant {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -142,35 +161,74 @@ impl Chunk {
     }
 }
 
-/// Disassemble a chunk into human-readable text.
+/// Disassemble a chunk into structured, human-readable text with recursive
+/// function output and constant pool display.
 ///
-/// Returns an error if the chunk contains an invalid opcode, since subsequent
-/// instruction boundaries cannot be determined reliably.
-pub fn disassemble(chunk: &Chunk, name: &str) -> Result<String> {
+/// `source_name` is shown in the header (e.g. a file path or `"<script>"`).
+pub fn disassemble(chunk: &Chunk, source_name: &str) -> Result<String> {
     let mut out = String::new();
-    out.push_str(&format!("== {name} ==\n"));
-    let mut offset = 0;
-    while offset < chunk.code.len() {
-        offset = disassemble_instruction(chunk, offset, &mut out)?;
-    }
+    out.push_str(&format!("Compiled from \"{source_name}\"\n"));
+    disassemble_chunk(chunk, "script", 0, &mut out)?;
     Ok(out)
 }
 
-fn disassemble_instruction(chunk: &Chunk, offset: usize, out: &mut String) -> Result<usize> {
-    out.push_str(&format!("{offset:04} "));
-
-    if offset > 0 && chunk.lines[offset] == chunk.lines[offset - 1] {
-        out.push_str("   | ");
+/// Recursively disassemble a single chunk (script or function body).
+fn disassemble_chunk(chunk: &Chunk, name: &str, arity: usize, out: &mut String) -> Result<()> {
+    // Function header
+    if name == "script" {
+        out.push_str("script;\n");
     } else {
-        out.push_str(&format!("{:4} ", chunk.lines[offset]));
+        let params: Vec<String> = (0..arity).map(|i| format!("_{i}")).collect();
+        out.push_str(&format!(
+            "fun {name}({});  // arity={arity}\n",
+            params.join(", ")
+        ));
     }
 
-    let byte = chunk.code[offset];
-    let op = OpCode::try_from(byte);
-    if op.is_err() {
-        bail!("invalid opcode {byte} at offset {offset}");
+    // Constants section
+    if !chunk.constants.is_empty() {
+        out.push_str("  Constants:\n");
+        for (i, constant) in chunk.constants.iter().enumerate() {
+            out.push_str(&format!(
+                "    {:>3} = {:<14}  {}\n",
+                format!("#{i}"),
+                constant.type_name(),
+                constant.pool_value()
+            ));
+        }
+        out.push('\n');
     }
-    let op = op.expect("checked above");
+
+    // Code section
+    out.push_str("  Code:\n");
+    let mut offset = 0;
+    while offset < chunk.code.len() {
+        offset = disassemble_instruction(chunk, offset, out)?;
+    }
+    out.push('\n');
+
+    // Recursively disassemble nested functions
+    for constant in &chunk.constants {
+        if let Constant::Function {
+            name,
+            arity,
+            chunk: fn_chunk,
+            ..
+        } = constant
+        {
+            disassemble_chunk(fn_chunk, name, *arity, out)?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Format a single instruction into `out`, returning the next offset.
+fn disassemble_instruction(chunk: &Chunk, offset: usize, out: &mut String) -> Result<usize> {
+    let byte = chunk.code[offset];
+    let op = OpCode::try_from(byte)
+        .map_err(|b| anyhow::anyhow!("invalid opcode {b} at offset {offset}"))?;
+    let name = op.as_ref();
 
     match op {
         OpCode::Constant
@@ -183,9 +241,10 @@ fn disassemble_instruction(chunk: &Chunk, offset: usize, out: &mut String) -> Re
         | OpCode::Method
         | OpCode::GetSuper => {
             let idx = chunk.code[offset + 1];
+            let comment = &chunk.constants[idx as usize];
             out.push_str(&format!(
-                "{op:<16} {idx:4} '{}'\n",
-                chunk.constants[idx as usize]
+                "    {:>3}: {:<18} #{:<5} // {comment}\n",
+                offset, name, idx
             ));
             Ok(offset + 2)
         }
@@ -195,53 +254,52 @@ fn disassemble_instruction(chunk: &Chunk, offset: usize, out: &mut String) -> Re
         | OpCode::GetUpvalue
         | OpCode::SetUpvalue => {
             let slot = chunk.code[offset + 1];
-            out.push_str(&format!("{op:<16} {slot:4}\n"));
+            out.push_str(&format!("    {:>3}: {:<18} {slot}\n", offset, name));
             Ok(offset + 2)
         }
         OpCode::Jump | OpCode::JumpIfFalse => {
             let jump = chunk.read_u16(offset + 1);
             let target = offset + 3 + jump as usize;
-            out.push_str(&format!("{op:<16} {offset:4} -> {target}\n"));
+            out.push_str(&format!("    {:>3}: {:<18} -> {target}\n", offset, name));
             Ok(offset + 3)
         }
         OpCode::Loop => {
             let jump = chunk.read_u16(offset + 1);
             let target = offset + 3 - jump as usize;
-            out.push_str(&format!("{op:<16} {offset:4} -> {target}\n"));
+            out.push_str(&format!("    {:>3}: {:<18} -> {target}\n", offset, name));
             Ok(offset + 3)
         }
         OpCode::Invoke | OpCode::SuperInvoke => {
             let name_idx = chunk.code[offset + 1];
             let arg_count = chunk.code[offset + 2];
+            let comment = &chunk.constants[name_idx as usize];
             out.push_str(&format!(
-                "{op:<16} ({arg_count} args) {name_idx:4} '{}'\n",
-                chunk.constants[name_idx as usize]
+                "    {:>3}: {:<18} #{:<5} // ({arg_count} args) {comment}\n",
+                offset, name, name_idx
             ));
             Ok(offset + 3)
         }
         OpCode::Closure => {
-            let mut off = offset + 1;
-            let idx = chunk.code[off];
-            off += 1;
+            let idx = chunk.code[offset + 1];
+            let comment = &chunk.constants[idx as usize];
             out.push_str(&format!(
-                "{op:<16} {idx:4} {}\n",
-                chunk.constants[idx as usize]
+                "    {:>3}: {:<18} #{:<5} // {comment}\n",
+                offset, name, idx
             ));
+            let mut off = offset + 2;
             if let Constant::Function { upvalue_count, .. } = &chunk.constants[idx as usize] {
                 for _ in 0..*upvalue_count {
                     let is_local = chunk.code[off];
                     let index = chunk.code[off + 1];
                     let kind = if is_local == 1 { "local" } else { "upvalue" };
-                    out.push_str(&format!(
-                        "{off:04}    |                     {kind} {index}\n"
-                    ));
+                    out.push_str(&format!("           | {kind} {index}\n"));
                     off += 2;
                 }
             }
             Ok(off)
         }
         _ => {
-            out.push_str(&format!("{op}\n"));
+            out.push_str(&format!("    {:>3}: {name}\n", offset));
             Ok(offset + 1)
         }
     }
@@ -272,9 +330,9 @@ mod tests {
         chunk.write_op(OpCode::Return, 1);
 
         let text = disassemble(&chunk, "test").expect("valid bytecode");
-        assert!(text.contains("Constant"));
+        assert!(text.contains("constant"));
         assert!(text.contains("42"));
-        assert!(text.contains("Return"));
+        assert!(text.contains("return"));
     }
 
     #[test]
@@ -414,11 +472,13 @@ mod tests {
     // ========== Disassembly ==========
 
     #[test]
-    fn disassemble_with_name() {
+    fn disassemble_header_and_structure() {
         let mut chunk = Chunk::new();
         chunk.write_op(OpCode::Return, 1);
-        let text = disassemble(&chunk, "test_chunk").expect("valid bytecode");
-        assert!(text.contains("== test_chunk =="));
+        let text = disassemble(&chunk, "test_chunk.lox").expect("valid bytecode");
+        assert!(text.contains("Compiled from \"test_chunk.lox\""));
+        assert!(text.contains("script;"));
+        assert!(text.contains("Code:"));
     }
 
     #[test]
@@ -440,11 +500,10 @@ mod tests {
         chunk.write_op(OpCode::Return, 1);
 
         let text = disassemble(&chunk, "test").expect("valid bytecode");
-        assert!(text.contains("Nil"));
-        assert!(text.contains("True"));
-        assert!(text.contains("False"));
-        assert!(text.contains("Add"));
-        assert!(text.contains("Return"));
+        assert!(text.contains("nil"));
+        assert!(text.contains("add"));
+        assert!(text.contains("subtract"));
+        assert!(text.contains("return"));
     }
 
     #[test]
@@ -455,8 +514,9 @@ mod tests {
         chunk.write_byte(idx, 1);
 
         let text = disassemble(&chunk, "test").expect("valid bytecode");
-        assert!(text.contains("Constant"));
+        assert!(text.contains("constant"));
         assert!(text.contains("123.45"));
+        assert!(text.contains("#0"));
     }
 
     #[test]
@@ -477,21 +537,21 @@ mod tests {
         chunk.write_u16(10, 1);
 
         let text = disassemble(&chunk, "test").expect("valid bytecode");
-        assert!(text.contains("Jump"));
-        assert!(text.contains("->"));
+        assert!(text.contains("jump"));
+        assert!(text.contains("-> 13"));
     }
 
     #[test]
     fn disassemble_loop_instruction() {
         let mut chunk = Chunk::new();
-        // Write some code first so loop has something to jump back to
         chunk.write_op(OpCode::Nil, 1);
         chunk.write_op(OpCode::Nil, 1);
         chunk.write_op(OpCode::Loop, 1);
         chunk.write_u16(2, 1);
 
         let text = disassemble(&chunk, "test").expect("valid bytecode");
-        assert!(text.contains("Loop"));
+        assert!(text.contains("loop"));
+        assert!(text.contains("-> 3"));
     }
 
     #[test]
@@ -503,34 +563,23 @@ mod tests {
         chunk.write_byte(5, 1);
 
         let text = disassemble(&chunk, "test").expect("valid bytecode");
-        assert!(text.contains("GetLocal"));
-        assert!(text.contains("SetLocal"));
+        assert!(text.contains("get_local"));
+        assert!(text.contains("set_local"));
     }
 
     #[test]
-    fn disassemble_line_numbers_shown() {
+    fn disassemble_constants_section() {
         let mut chunk = Chunk::new();
-        chunk.write_op(OpCode::Nil, 1);
-        chunk.write_op(OpCode::True, 2);
-        chunk.write_op(OpCode::False, 3);
+        chunk.add_constant(Constant::Number(42.0));
+        chunk.add_constant(Constant::String("hello".to_string()));
+        chunk.write_op(OpCode::Return, 1);
 
         let text = disassemble(&chunk, "test").expect("valid bytecode");
-        // First instruction shows line number
-        assert!(text.contains("   1"));
-        // Subsequent different lines show new numbers
-        assert!(text.contains("   2"));
-        assert!(text.contains("   3"));
-    }
-
-    #[test]
-    fn disassemble_same_line_shows_pipe() {
-        let mut chunk = Chunk::new();
-        chunk.write_op(OpCode::Nil, 1);
-        chunk.write_op(OpCode::True, 1);
-
-        let text = disassemble(&chunk, "test").expect("valid bytecode");
-        // Second instruction on same line should show |
-        assert!(text.contains("   |"));
+        assert!(text.contains("Constants:"));
+        assert!(text.contains("#0 = Number"));
+        assert!(text.contains("42"));
+        assert!(text.contains("#1 = String"));
+        assert!(text.contains("\"hello\""));
     }
 
     // ========== Serialization Edge Cases ==========
@@ -599,5 +648,91 @@ mod tests {
         assert!(chunk.code.is_empty());
         assert!(chunk.constants.is_empty());
         assert!(chunk.lines.is_empty());
+    }
+
+    // ========== New Disassembly Format Tests ==========
+
+    #[test]
+    fn test_snake_case_names() {
+        assert_eq!(OpCode::Constant.as_ref(), "constant");
+        assert_eq!(OpCode::JumpIfFalse.as_ref(), "jump_if_false");
+        assert_eq!(OpCode::GetLocal.as_ref(), "get_local");
+        assert_eq!(OpCode::DefineGlobal.as_ref(), "define_global");
+        assert_eq!(OpCode::CloseUpvalue.as_ref(), "close_upvalue");
+        assert_eq!(OpCode::SuperInvoke.as_ref(), "super_invoke");
+        assert_eq!(OpCode::GetSuper.as_ref(), "get_super");
+        assert_eq!(OpCode::Return.as_ref(), "return");
+    }
+
+    #[test]
+    fn test_nested_function_disassembly() {
+        let mut inner_chunk = Chunk::new();
+        inner_chunk.add_constant(Constant::Number(1.0));
+        inner_chunk.write_op(OpCode::Constant, 1);
+        inner_chunk.write_byte(0, 1);
+        inner_chunk.write_op(OpCode::Return, 1);
+
+        let mut chunk = Chunk::new();
+        let fn_idx = chunk.add_constant(Constant::Function {
+            name: "add".to_string(),
+            arity: 2,
+            upvalue_count: 0,
+            chunk: inner_chunk,
+        });
+        chunk.write_op(OpCode::Closure, 1);
+        chunk.write_byte(fn_idx, 1);
+        chunk.write_op(OpCode::Return, 1);
+
+        let text = disassemble(&chunk, "test.lox").expect("valid bytecode");
+        // Top-level script section
+        assert!(text.contains("script;"));
+        assert!(text.contains("closure"));
+        // Nested function section
+        assert!(text.contains("fun add(_0, _1);  // arity=2"));
+        assert!(text.contains("constant"));
+    }
+
+    #[test]
+    fn test_jump_target_format() {
+        let mut chunk = Chunk::new();
+        // jump_if_false at offset 0, jumping over 7 bytes → target = 0 + 3 + 7 = 10
+        chunk.write_op(OpCode::JumpIfFalse, 1);
+        chunk.write_u16(7, 1);
+        // some filler
+        for _ in 0..7 {
+            chunk.write_op(OpCode::Pop, 1);
+        }
+
+        let text = disassemble(&chunk, "test").expect("valid bytecode");
+        assert!(text.contains("jump_if_false"));
+        assert!(text.contains("-> 10"));
+    }
+
+    #[test]
+    fn test_closure_upvalue_display() {
+        let mut inner_chunk = Chunk::new();
+        inner_chunk.write_op(OpCode::Return, 1);
+
+        let mut chunk = Chunk::new();
+        let fn_idx = chunk.add_constant(Constant::Function {
+            name: "closure_fn".to_string(),
+            arity: 0,
+            upvalue_count: 2,
+            chunk: inner_chunk,
+        });
+        chunk.write_op(OpCode::Closure, 1);
+        chunk.write_byte(fn_idx, 1);
+        // upvalue 0: local slot 1
+        chunk.write_byte(1, 1);
+        chunk.write_byte(1, 1);
+        // upvalue 1: captured upvalue index 0
+        chunk.write_byte(0, 1);
+        chunk.write_byte(0, 1);
+        chunk.write_op(OpCode::Return, 1);
+
+        let text = disassemble(&chunk, "test").expect("valid bytecode");
+        assert!(text.contains("closure"));
+        assert!(text.contains("| local 1"));
+        assert!(text.contains("| upvalue 0"));
     }
 }
