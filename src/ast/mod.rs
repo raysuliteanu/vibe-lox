@@ -164,35 +164,28 @@ pub struct BinaryExpr {
     pub span: Span,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, strum::Display)]
 pub enum BinaryOp {
+    #[strum(serialize = "+")]
     Add,
+    #[strum(serialize = "-")]
     Subtract,
+    #[strum(serialize = "*")]
     Multiply,
+    #[strum(serialize = "/")]
     Divide,
+    #[strum(serialize = "==")]
     Equal,
+    #[strum(serialize = "!=")]
     NotEqual,
+    #[strum(serialize = "<")]
     Less,
+    #[strum(serialize = "<=")]
     LessEqual,
+    #[strum(serialize = ">")]
     Greater,
+    #[strum(serialize = ">=")]
     GreaterEqual,
-}
-
-impl std::fmt::Display for BinaryOp {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Add => write!(f, "+"),
-            Self::Subtract => write!(f, "-"),
-            Self::Multiply => write!(f, "*"),
-            Self::Divide => write!(f, "/"),
-            Self::Equal => write!(f, "=="),
-            Self::NotEqual => write!(f, "!="),
-            Self::Less => write!(f, "<"),
-            Self::LessEqual => write!(f, "<="),
-            Self::Greater => write!(f, ">"),
-            Self::GreaterEqual => write!(f, ">="),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -203,19 +196,12 @@ pub struct UnaryExpr {
     pub span: Span,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, strum::Display)]
 pub enum UnaryOp {
+    #[strum(serialize = "-")]
     Negate,
+    #[strum(serialize = "!")]
     Not,
-}
-
-impl std::fmt::Display for UnaryOp {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Negate => write!(f, "-"),
-            Self::Not => write!(f, "!"),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -255,19 +241,11 @@ pub struct AssignExpr {
     pub span: Span,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, strum::Display)]
+#[strum(serialize_all = "lowercase")]
 pub enum LogicalOp {
     And,
     Or,
-}
-
-impl std::fmt::Display for LogicalOp {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::And => write!(f, "and"),
-            Self::Or => write!(f, "or"),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize)]

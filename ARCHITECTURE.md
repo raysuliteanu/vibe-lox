@@ -14,6 +14,8 @@ compile to LLVM IR for execution via `lli`.
    for use with the VM
 4. **LLVM IR Compiler** (`--compile-llvm`) - Compile to LLVM IR, run via `lli`
    with the C runtime library
+5. **Native Compiler** (`--compile`) - Compile to a native ELF executable via
+   LLVM object emission and system linker
 
 The architecture follows a classic compiler pipeline with clear separation between phases:
 
@@ -25,6 +27,8 @@ Source Code → Tokenization → Parsing → AST → [Resolution] → Execution
                                        Bytecode Compiler → VM
                                               ↓
                                        LLVM IR Codegen → lli
+                                              ↓
+                                       Native Compiler → ELF executable
 ```
 
 ---
@@ -1065,7 +1069,7 @@ All Lox values are represented as a tagged union struct `{ i8, i64 }`:
 
 #### `runtime/lox_runtime.c`
 
-- C runtime library loaded via `lli -load`
+- C runtime library loaded via `lli --extra-object`
 - Implements: printing, global variable hash map, truthiness, error reporting,
   closure allocation, heap cells for captured variables, string concatenation
   and equality, class/instance allocation, field get/set, method lookup
@@ -1086,10 +1090,34 @@ runtime error reporting with line numbers.
 # Build the runtime (once)
 make -C runtime
 
-# Compile and run
+# Compile to LLVM IR and run via lli
 cargo run -- --compile-llvm file.lox
-lli -load runtime/liblox_runtime.so file.ll
+lli --extra-object runtime/lox_runtime.o file.ll
+
+# Compile to native executable
+cargo run -- --compile file.lox         # produces ./file
+cargo run -- --compile -o out file.lox  # custom output path
 ```
+
+### Native Compilation Pipeline
+
+The `--compile` flag extends the LLVM codegen to produce a self-contained native
+ELF executable. The pipeline:
+
+1. **Module emission** — same as `--compile-llvm`, producing an in-memory LLVM
+   `Module` via `compile_to_module()`
+2. **Object emission** (`src/codegen/native.rs`) — initializes the host's native
+   LLVM target, creates a `TargetMachine`, sets the module's triple and data
+   layout, then calls `machine.write_to_file()` to emit a `.o` object file
+3. **Linking** — invokes `gcc` (or `$CC`) to link the program object with
+   `lox_runtime.o` (statically linked C runtime) and `-lm`
+
+The `build.rs` script compiles `lox_runtime.o`, used by both `lli --extra-object`
+and native linking. The object file path is exposed at compile time via
+`env!("LOX_RUNTIME_OBJ")`.
+
+Bytecode `.blox` files cannot be compiled to native executables because they
+discard AST structure and resolution data needed for LLVM IR generation.
 
 ### Data Flow
 
@@ -1098,9 +1126,9 @@ AST
     ↓
 CodeGen (AST walking, inkwell API)
     ↓
-LLVM IR text (.ll file)
-    ↓
-lli + liblox_runtime.so → execution
+LLVM Module (in-memory)
+    ├──→ print_to_string() → .ll file → lli (--compile-llvm)
+    └──→ TargetMachine → .o file → gcc → ELF executable (--compile)
 ```
 
 ---
@@ -1398,17 +1426,17 @@ src/
 │   ├── compiler.rs     # AST → bytecode compiler
 │   └── vm.rs           # Stack-based VM execution
 │
-└── codegen/             # Phase 5: LLVM IR compilation
-    ├── mod.rs          # Public compile() API
+└── codegen/             # Phase 5: LLVM IR and native compilation
+    ├── mod.rs          # Public compile() and compile_to_module() API
     ├── compiler.rs     # CodeGen struct, AST → LLVM IR
+    ├── native.rs       # Native ELF compilation (object emission + linking)
     ├── capture.rs      # Capture analysis (variables crossing function boundaries)
     ├── types.rs        # LoxValue type ({i8, i64} tagged union)
     └── runtime.rs      # External runtime function declarations
 
 runtime/                 # C runtime for LLVM-compiled programs
 ├── lox_runtime.c       # print, globals, truthiness, closures, strings, classes
-├── lox_runtime.h       # Header with LoxValue struct and tag constants
-└── Makefile            # Build liblox_runtime.so
+└── lox_runtime.h       # Header with LoxValue struct and tag constants
 ```
 
 ---
@@ -1447,9 +1475,10 @@ fn resolve(source: &str) -> Result<HashMap<ExprId, usize>, Vec<LoxError>>
 
 ```
 tests/
-├── interpreter_tests.rs    # Tree-walk interpreter (9 tests)
-├── vm_tests.rs             # Bytecode VM (12 tests)
-└── llvm_tests.rs           # LLVM IR codegen (13 tests)
+├── interpreter_tests.rs       # Tree-walk interpreter (9 tests)
+├── vm_tests.rs                # Bytecode VM (12 tests)
+├── llvm_tests.rs              # LLVM IR codegen (13 tests)
+└── native_compile_tests.rs    # Native ELF compilation (14 tests)
 
 fixtures/
 ├── hello.lox               # Hello world
@@ -1552,7 +1581,7 @@ rstest = "0.26"         # Parameterized testing
 5. ~~**LLVM IR compilation**~~ (done — full Lox language support via `inkwell`)
 6. **REPL improvements:** Multi-line input, syntax highlighting
 7. **Debugger:** Step through bytecode, inspect stack
-8. **LLVM native compilation:** Compile `.ll` to native binary via `clang`
+8. ~~**LLVM native compilation:** Compile `.ll` to native binary via `clang`~~ (done — `--compile` produces native ELF executables via inkwell `TargetMachine`)
 9. **Garbage collection:** The C runtime currently leaks all heap allocations
 10. **Stack overflow detection:** No depth counter for deep recursion
 

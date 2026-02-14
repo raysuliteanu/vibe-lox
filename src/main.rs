@@ -36,6 +36,14 @@ struct Cli {
     #[arg(long)]
     compile_llvm: bool,
 
+    /// Compile to a native executable
+    #[arg(long, conflicts_with_all = ["compile_llvm", "compile_bytecode", "disassemble", "dump_tokens", "dump_ast"])]
+    compile: bool,
+
+    /// Output file path (overrides default for --compile-bytecode / --compile-llvm / --compile)
+    #[arg(short = 'o', long = "output")]
+    output: Option<PathBuf>,
+
     /// Suppress informational output
     #[arg(short = 'q')]
     quiet: bool,
@@ -170,6 +178,10 @@ fn main() -> Result<()> {
         bail!("file not found: '{}'", path.display());
     }
 
+    if cli.output.is_some() && !cli.compile_bytecode && !cli.compile_llvm && !cli.compile {
+        bail!("--output/-o can only be used with --compile-bytecode, --compile-llvm, or --compile");
+    }
+
     if cli.dump_tokens {
         let source = read_source(&cli)?;
         let filename = get_filename(&cli);
@@ -234,10 +246,46 @@ fn main() -> Result<()> {
             .file
             .as_ref()
             .context("--compile-bytecode requires an input file")?;
-        let output_path = input_path.with_extension("blox");
+        let output_path = cli
+            .output
+            .clone()
+            .unwrap_or_else(|| input_path.with_extension("blox"));
         let source = read_source(&cli)?;
         let compiled = compile_source(&source)?;
         save_chunk(&compiled, &output_path)?;
+        if !cli.quiet {
+            println!("Wrote bytecode to {}", output_path.display());
+        }
+        return Ok(());
+    }
+
+    if cli.compile {
+        let input_path = cli
+            .file
+            .as_ref()
+            .context("--compile requires an input file")?;
+        if is_bytecode_file(input_path)? {
+            bail!("cannot compile .blox bytecode to a native executable; use a .lox source file");
+        }
+        let output_path = cli.output.clone().unwrap_or_else(|| {
+            let stem = input_path.file_stem().unwrap_or_default();
+            input_path.with_file_name(stem)
+        });
+        let source = read_source(&cli)?;
+        let filename = get_filename(&cli);
+        let tokens =
+            scanner::scan(&source).map_err(|e| report_compile_errors(e, &filename, &source))?;
+        let program = LoxParser::new(tokens)
+            .parse()
+            .map_err(|e| report_compile_errors(e, &filename, &source))?;
+        let context = inkwell::context::Context::create();
+        let module = vibe_lox::codegen::compile_to_module(&context, &program, &source)
+            .context("compile to LLVM module")?;
+        vibe_lox::codegen::native::compile_to_executable(&module, &output_path)
+            .context("compile to native executable")?;
+        if !cli.quiet {
+            println!("Compiled native executable: {}", output_path.display());
+        }
         return Ok(());
     }
 
@@ -246,7 +294,10 @@ fn main() -> Result<()> {
             .file
             .as_ref()
             .context("--compile-llvm requires an input file")?;
-        let output_path = input_path.with_extension("ll");
+        let output_path = cli
+            .output
+            .clone()
+            .unwrap_or_else(|| input_path.with_extension("ll"));
         let source = read_source(&cli)?;
         let filename = get_filename(&cli);
         let tokens =
@@ -267,11 +318,17 @@ fn main() -> Result<()> {
         Some(ref path) => {
             // Autodetect: if the file starts with the "blox" magic, run via VM
             if is_bytecode_file(path)? {
+                if !cli.quiet {
+                    println!("Running VM for {}", path.display());
+                }
                 let compiled = load_chunk(path)?;
                 let mut vm = vibe_lox::vm::vm::Vm::new();
                 vm.interpret(compiled)
                     .map_err(|e| report_runtime_error(&e, None))?;
             } else {
+                if !cli.quiet {
+                    println!("Interpreting {}", path.display());
+                }
                 let source = read_source(&cli)?;
                 let filename = get_filename(&cli);
                 run_source(&source, &filename)?;
