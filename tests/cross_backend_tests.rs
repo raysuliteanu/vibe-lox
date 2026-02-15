@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+use rstest::rstest;
 use vibe_lox::interpreter::Interpreter;
 use vibe_lox::interpreter::resolver::Resolver;
 use vibe_lox::parser::Parser;
@@ -82,42 +83,15 @@ fn assert_backends_match(fixture_name: &str) {
     );
 }
 
-#[test]
-fn cross_backend_arithmetic() {
-    assert_backends_match("arithmetic.lox");
-}
-
-#[test]
-fn cross_backend_hello() {
-    assert_backends_match("hello.lox");
-}
-
-#[test]
-fn cross_backend_control_flow() {
-    assert_backends_match("control_flow.lox");
-}
-
-#[test]
-fn cross_backend_scoping() {
-    assert_backends_match("scoping.lox");
-}
-
-#[test]
-fn cross_backend_fib() {
-    assert_backends_match("fib.lox");
-}
-
-#[test]
-fn cross_backend_counter() {
-    assert_backends_match("counter.lox");
-}
-
-#[test]
-fn cross_backend_strings() {
-    assert_backends_match("strings.lox");
-}
-
-#[test]
-fn cross_backend_classes() {
-    assert_backends_match("classes.lox");
+#[rstest]
+#[case("arithmetic.lox")]
+#[case("hello.lox")]
+#[case("control_flow.lox")]
+#[case("scoping.lox")]
+#[case("fib.lox")]
+#[case("counter.lox")]
+#[case("strings.lox")]
+#[case("classes.lox")]
+fn cross_backend(#[case] fixture: &str) {
+    assert_backends_match(fixture);
 }

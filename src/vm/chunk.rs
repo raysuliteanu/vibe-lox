@@ -440,33 +440,16 @@ mod tests {
 
     // ========== U16 Operations ==========
 
-    #[test]
-    fn write_and_read_u16_small() {
+    #[rstest::rstest]
+    #[case(42)]
+    #[case(0xABCD)]
+    #[case(0xFFFF)]
+    #[case(0)]
+    fn write_and_read_u16(#[case] value: u16) {
         let mut chunk = Chunk::new();
-        chunk.write_u16(42, 1);
+        chunk.write_u16(value, 1);
         assert_eq!(chunk.code.len(), 2);
-        assert_eq!(chunk.read_u16(0), 42);
-    }
-
-    #[test]
-    fn write_and_read_u16_large() {
-        let mut chunk = Chunk::new();
-        chunk.write_u16(0xABCD, 1);
-        assert_eq!(chunk.read_u16(0), 0xABCD);
-    }
-
-    #[test]
-    fn write_and_read_u16_max() {
-        let mut chunk = Chunk::new();
-        chunk.write_u16(0xFFFF, 1);
-        assert_eq!(chunk.read_u16(0), 0xFFFF);
-    }
-
-    #[test]
-    fn write_and_read_u16_zero() {
-        let mut chunk = Chunk::new();
-        chunk.write_u16(0, 1);
-        assert_eq!(chunk.read_u16(0), 0);
+        assert_eq!(chunk.read_u16(0), value);
     }
 
     // ========== Disassembly ==========

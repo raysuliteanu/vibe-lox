@@ -1,3 +1,6 @@
+use std::path::PathBuf;
+
+use rstest::rstest;
 use vibe_lox::error::RuntimeError;
 use vibe_lox::interpreter::Interpreter;
 use vibe_lox::interpreter::resolver::Resolver;
@@ -28,56 +31,20 @@ fn run_fixture_err(source: &str) -> RuntimeError {
     interp.interpret(&program, locals).unwrap_err()
 }
 
-#[test]
-fn fixture_arithmetic() {
-    let source = include_str!("../fixtures/arithmetic.lox");
-    let expected = include_str!("../fixtures/arithmetic.expected");
-    let output = run_fixture(source);
-    let expected_lines: Vec<&str> = expected.lines().collect();
-    assert_eq!(output, expected_lines);
-}
-
-#[test]
-fn fixture_scoping() {
-    let source = include_str!("../fixtures/scoping.lox");
-    let expected = include_str!("../fixtures/scoping.expected");
-    let output = run_fixture(source);
-    let expected_lines: Vec<&str> = expected.lines().collect();
-    assert_eq!(output, expected_lines);
-}
-
-#[test]
-fn fixture_classes() {
-    let source = include_str!("../fixtures/classes.lox");
-    let expected = include_str!("../fixtures/classes.expected");
-    let output = run_fixture(source);
-    let expected_lines: Vec<&str> = expected.lines().collect();
-    assert_eq!(output, expected_lines);
-}
-
-#[test]
-fn fixture_counter() {
-    let source = include_str!("../fixtures/counter.lox");
-    let expected = include_str!("../fixtures/counter.expected");
-    let output = run_fixture(source);
-    let expected_lines: Vec<&str> = expected.lines().collect();
-    assert_eq!(output, expected_lines);
-}
-
-#[test]
-fn fixture_fibonacci() {
-    let source = include_str!("../fixtures/fib.lox");
-    let expected = include_str!("../fixtures/fib.expected");
-    let output = run_fixture(source);
-    let expected_lines: Vec<&str> = expected.lines().collect();
-    assert_eq!(output, expected_lines);
-}
-
-#[test]
-fn fixture_hello() {
-    let source = include_str!("../fixtures/hello.lox");
-    let expected = include_str!("../fixtures/hello.expected");
-    let output = run_fixture(source);
+#[rstest]
+#[case("arithmetic.lox")]
+#[case("scoping.lox")]
+#[case("classes.lox")]
+#[case("counter.lox")]
+#[case("fib.lox")]
+#[case("hello.lox")]
+fn interpreter_fixture(#[case] fixture: &str) {
+    let fixture_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+    let source = std::fs::read_to_string(fixture_dir.join(fixture))
+        .unwrap_or_else(|_| panic!("read fixture {fixture}"));
+    let expected = std::fs::read_to_string(fixture_dir.join(fixture.replace(".lox", ".expected")))
+        .unwrap_or_else(|_| panic!("read expected for {fixture}"));
+    let output = run_fixture(&source);
     let expected_lines: Vec<&str> = expected.lines().collect();
     assert_eq!(output, expected_lines);
 }
