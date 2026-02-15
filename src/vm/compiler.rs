@@ -24,8 +24,6 @@ enum FunctionType {
 }
 
 struct CompilerState {
-    #[allow(dead_code)]
-    function_name: String,
     function_type: FunctionType,
     chunk: Chunk,
     locals: Vec<Local>,
@@ -35,9 +33,8 @@ struct CompilerState {
 }
 
 impl CompilerState {
-    fn new(name: String, function_type: FunctionType) -> Self {
+    fn new(function_type: FunctionType) -> Self {
         let mut state = Self {
-            function_name: name,
             function_type,
             chunk: Chunk::new(),
             locals: Vec::new(),
@@ -69,10 +66,7 @@ pub struct Compiler {
 impl Compiler {
     pub fn new() -> Self {
         Self {
-            states: vec![CompilerState::new(
-                "script".to_string(),
-                FunctionType::Script,
-            )],
+            states: vec![CompilerState::new(FunctionType::Script)],
         }
     }
 
@@ -261,8 +255,7 @@ impl Compiler {
         function: &Function,
         func_type: FunctionType,
     ) -> Result<(), CompileError> {
-        self.states
-            .push(CompilerState::new(function.name.clone(), func_type));
+        self.states.push(CompilerState::new(func_type));
         self.begin_scope();
 
         for param in &function.params {

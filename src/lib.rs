@@ -1,5 +1,3 @@
-#![allow(unused_assignments)]
-
 pub mod ast;
 pub mod codegen;
 pub mod error;

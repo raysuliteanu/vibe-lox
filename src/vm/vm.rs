@@ -13,8 +13,6 @@ enum VmValue {
     Bool(bool),
     Nil,
     String(Rc<String>),
-    #[allow(dead_code)]
-    Function(Rc<VmFunction>),
     Closure(Rc<VmClosure>),
     NativeFunction(NativeFn),
     Class(Rc<RefCell<VmClass>>),
@@ -41,7 +39,6 @@ impl std::fmt::Display for VmValue {
             Self::Bool(b) => write!(f, "{b}"),
             Self::Nil => write!(f, "nil"),
             Self::String(s) => write!(f, "{s}"),
-            Self::Function(func) => write!(f, "<fn {}>", func.name),
             Self::Closure(c) => write!(f, "<fn {}>", c.function.name),
             Self::NativeFunction(_) => write!(f, "<native fn>"),
             Self::Class(c) => write!(f, "{}", c.borrow().name),
