@@ -61,3 +61,8 @@ Pipeline: Source -> Scanner (winnow) -> Tokens -> Parser -> AST -> Interpreter/V
 - Test fixtures go in `fixtures/` as `.lox` files with `.expected` sidecar files
 - Integration tests in `tests/`, examples in `examples/`
 - Run `cargo clippy` and `cargo fmt --check` after every change
+
+## Source Control
+
+- Project uses `jj` (Jujutsu), not `git`
+- Use `jj commit` to set the description and advance the working copy (not `jj describe`)
