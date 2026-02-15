@@ -1,3 +1,6 @@
+use std::path::PathBuf;
+
+use rstest::rstest;
 use vibe_lox::error::RuntimeError;
 use vibe_lox::vm::chunk;
 use vibe_lox::vm::compile_to_chunk;
@@ -19,74 +22,40 @@ fn run_vm_roundtrip(source: &str) -> Vec<String> {
     vm.output().to_vec()
 }
 
-#[test]
-fn vm_fixture_arithmetic() {
-    let source = include_str!("../fixtures/arithmetic.lox");
-    let expected = include_str!("../fixtures/arithmetic.expected");
-    let expected_lines: Vec<&str> = expected.lines().collect();
-    assert_eq!(run_vm_fixture(source), expected_lines);
-}
-
-#[test]
-fn vm_fixture_scoping() {
-    let source = include_str!("../fixtures/scoping.lox");
-    let expected = include_str!("../fixtures/scoping.expected");
-    let expected_lines: Vec<&str> = expected.lines().collect();
-    assert_eq!(run_vm_fixture(source), expected_lines);
-}
-
-#[test]
-fn vm_fixture_classes() {
-    let source = include_str!("../fixtures/classes.lox");
-    let expected = include_str!("../fixtures/classes.expected");
-    let expected_lines: Vec<&str> = expected.lines().collect();
-    assert_eq!(run_vm_fixture(source), expected_lines);
-}
-
-#[test]
-fn vm_fixture_counter() {
-    let source = include_str!("../fixtures/counter.lox");
-    let expected = include_str!("../fixtures/counter.expected");
-    let expected_lines: Vec<&str> = expected.lines().collect();
-    assert_eq!(run_vm_fixture(source), expected_lines);
-}
-
-#[test]
-fn vm_fixture_fibonacci() {
-    let source = include_str!("../fixtures/fib.lox");
-    let expected = include_str!("../fixtures/fib.expected");
-    let expected_lines: Vec<&str> = expected.lines().collect();
-    assert_eq!(run_vm_fixture(source), expected_lines);
-}
-
-#[test]
-fn vm_fixture_hello() {
-    let source = include_str!("../fixtures/hello.lox");
-    let expected = include_str!("../fixtures/hello.expected");
-    let expected_lines: Vec<&str> = expected.lines().collect();
-    assert_eq!(run_vm_fixture(source), expected_lines);
-}
-
-#[test]
-fn vm_bytecode_roundtrip_fibonacci() {
-    let source = include_str!("../fixtures/fib.lox");
-    let expected = include_str!("../fixtures/fib.expected");
-    let expected_lines: Vec<&str> = expected.lines().collect();
-    assert_eq!(run_vm_roundtrip(source), expected_lines);
-}
-
-#[test]
-fn vm_bytecode_roundtrip_classes() {
-    let source = include_str!("../fixtures/classes.lox");
-    let expected = include_str!("../fixtures/classes.expected");
-    let expected_lines: Vec<&str> = expected.lines().collect();
-    assert_eq!(run_vm_roundtrip(source), expected_lines);
-}
-
 fn run_vm_err(source: &str) -> RuntimeError {
     let compiled = compile_to_chunk(source).expect("compile should succeed");
     let mut vm = Vm::new();
     vm.interpret(compiled).unwrap_err()
+}
+
+#[rstest]
+#[case("arithmetic.lox")]
+#[case("scoping.lox")]
+#[case("classes.lox")]
+#[case("counter.lox")]
+#[case("fib.lox")]
+#[case("hello.lox")]
+fn vm_fixture(#[case] fixture: &str) {
+    let fixture_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+    let source = std::fs::read_to_string(fixture_dir.join(fixture))
+        .unwrap_or_else(|_| panic!("read fixture {fixture}"));
+    let expected = std::fs::read_to_string(fixture_dir.join(fixture.replace(".lox", ".expected")))
+        .unwrap_or_else(|_| panic!("read expected for {fixture}"));
+    let expected_lines: Vec<&str> = expected.lines().collect();
+    assert_eq!(run_vm_fixture(&source), expected_lines);
+}
+
+#[rstest]
+#[case("fib.lox")]
+#[case("classes.lox")]
+fn vm_bytecode_roundtrip(#[case] fixture: &str) {
+    let fixture_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+    let source = std::fs::read_to_string(fixture_dir.join(fixture))
+        .unwrap_or_else(|_| panic!("read fixture {fixture}"));
+    let expected = std::fs::read_to_string(fixture_dir.join(fixture.replace(".lox", ".expected")))
+        .unwrap_or_else(|_| panic!("read expected for {fixture}"));
+    let expected_lines: Vec<&str> = expected.lines().collect();
+    assert_eq!(run_vm_roundtrip(&source), expected_lines);
 }
 
 #[test]

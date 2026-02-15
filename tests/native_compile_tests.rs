@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+use rstest::rstest;
+
 /// Compile a .lox fixture to a native executable, run it, and return stdout.
 fn run_native_fixture(fixture_name: &str) -> String {
     let project_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -84,94 +86,38 @@ fn run_native_error_fixture(fixture_name: &str) -> String {
     String::from_utf8(run_output.stderr).expect("stderr is valid UTF-8")
 }
 
-#[test]
-fn native_fixture_hello() {
-    let output = run_native_fixture("hello.lox");
-    let expected = include_str!("../fixtures/hello.expected");
+#[rstest]
+#[case("hello.lox")]
+#[case("arithmetic.lox")]
+#[case("control_flow.lox")]
+#[case("scoping.lox")]
+#[case("fib.lox")]
+#[case("counter.lox")]
+#[case("strings.lox")]
+#[case("classes.lox")]
+fn native_fixture(#[case] fixture: &str) {
+    let output = run_native_fixture(fixture);
+    let expected_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("fixtures")
+        .join(fixture.replace(".lox", ".expected"));
+    let expected = std::fs::read_to_string(&expected_path)
+        .unwrap_or_else(|_| panic!("read expected file {}", expected_path.display()));
     assert_eq!(output, expected);
 }
 
-#[test]
-fn native_fixture_arithmetic() {
-    let output = run_native_fixture("arithmetic.lox");
-    let expected = include_str!("../fixtures/arithmetic.expected");
-    assert_eq!(output, expected);
-}
-
-#[test]
-fn native_fixture_control_flow() {
-    let output = run_native_fixture("control_flow.lox");
-    let expected = include_str!("../fixtures/control_flow.expected");
-    assert_eq!(output, expected);
-}
-
-#[test]
-fn native_fixture_scoping() {
-    let output = run_native_fixture("scoping.lox");
-    let expected = include_str!("../fixtures/scoping.expected");
-    assert_eq!(output, expected);
-}
-
-#[test]
-fn native_fixture_fib() {
-    let output = run_native_fixture("fib.lox");
-    let expected = include_str!("../fixtures/fib.expected");
-    assert_eq!(output, expected);
-}
-
-#[test]
-fn native_fixture_counter() {
-    let output = run_native_fixture("counter.lox");
-    let expected = include_str!("../fixtures/counter.expected");
-    assert_eq!(output, expected);
-}
-
-#[test]
-fn native_fixture_strings() {
-    let output = run_native_fixture("strings.lox");
-    let expected = include_str!("../fixtures/strings.expected");
-    assert_eq!(output, expected);
-}
-
-#[test]
-fn native_fixture_classes() {
-    let output = run_native_fixture("classes.lox");
-    let expected = include_str!("../fixtures/classes.expected");
-    assert_eq!(output, expected);
-}
-
-#[test]
-fn native_error_type_negate() {
-    let stderr = run_native_error_fixture("error_type.lox");
-    let expected = include_str!("../fixtures/error_type.expected_error");
-    assert_eq!(stderr, expected);
-}
-
-#[test]
-fn native_error_add_types() {
-    let stderr = run_native_error_fixture("error_add_types.lox");
-    let expected = include_str!("../fixtures/error_add_types.expected_error");
-    assert_eq!(stderr, expected);
-}
-
-#[test]
-fn native_error_not_callable() {
-    let stderr = run_native_error_fixture("error_not_callable.lox");
-    let expected = include_str!("../fixtures/error_not_callable.expected_error");
-    assert_eq!(stderr, expected);
-}
-
-#[test]
-fn native_error_wrong_arity() {
-    let stderr = run_native_error_fixture("error_wrong_arity.lox");
-    let expected = include_str!("../fixtures/error_wrong_arity.expected_error");
-    assert_eq!(stderr, expected);
-}
-
-#[test]
-fn native_error_property_non_instance() {
-    let stderr = run_native_error_fixture("error_property_non_instance.lox");
-    let expected = include_str!("../fixtures/error_property_non_instance.expected_error");
+#[rstest]
+#[case("error_type.lox")]
+#[case("error_add_types.lox")]
+#[case("error_not_callable.lox")]
+#[case("error_wrong_arity.lox")]
+#[case("error_property_non_instance.lox")]
+fn native_error_fixture(#[case] fixture: &str) {
+    let stderr = run_native_error_fixture(fixture);
+    let expected_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("fixtures")
+        .join(fixture.replace(".lox", ".expected_error"));
+    let expected = std::fs::read_to_string(&expected_path)
+        .unwrap_or_else(|_| panic!("read expected error file {}", expected_path.display()));
     assert_eq!(stderr, expected);
 }
 

@@ -785,7 +785,6 @@ pub struct Compiler {
 }
 
 struct CompilerState {
-    function_name: String,
     function_type: FunctionType,  // Script, Function, Method, Initializer
     chunk: Chunk,
     locals: Vec<Local>,           // Current function's locals
@@ -900,6 +899,19 @@ enum VmUpvalue {
     Closed(VmValue),    // Closed-over value (moved to heap)
 }
 ```
+
+**Why closures only (no separate `Function` variant):**
+
+All user-defined functions are represented as `Closure` at runtime — a closure
+with zero upvalues is simply a plain function. This follows the approach from
+*Crafting Interpreters* (ch. 25) and Lua: rather than branching on "is this a
+function or a closure?" at every call site, the VM uses a single `Closure`
+representation unconditionally. The cost of an empty upvalue vector is
+negligible compared to the branch elimination it buys.
+
+Note that the LLVM codegen backend *can* optimize non-capturing functions to
+bare function pointers as a separate codegen-level optimization, since it
+operates at a different abstraction level than the bytecode VM.
 
 **Execution Loop:**
 
