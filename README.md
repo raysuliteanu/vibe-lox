@@ -10,6 +10,15 @@ by Claude using Opus 4.5/4.6 (as of creation of this README). Mostly I used the
 Claude CLI but I also used Opencode as my tool as well, still with Opus via
 Opencode Zen.
 
-One thing I want to do with this is go beyond the bytecode VM described in the
-`Crafting Interpreters` book and have Claude try and create LLVM IR so I can
-actually compile this to native code.
+## TODOs
+
+* enhance REPL to have "slash" commands using '\' since '/' is a reserved character; some possible commands are
+    * `help` - show available commands
+    * `quit` - exit the REPL
+    * `clear` - clear the screen
+    * `version` - show the current version of the compiler
+* skip `#!` shebang line in the scanner so `.lox` files can be made directly executable (e.g. `#!/usr/bin/env -S cargo run --`)
+* could we generate JVM bytecode?
+* explore performance optimizations
+* document the codebase comprehensively
+* create some example Lox programs in examples/ to run with `cargo run --example`
