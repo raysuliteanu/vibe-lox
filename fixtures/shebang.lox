@@ -1,0 +1,3 @@
+#!/usr/bin/env -S cargo run --
+print "hello from shebang";
+print 1 + 2;

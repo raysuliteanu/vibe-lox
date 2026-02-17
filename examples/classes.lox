@@ -1,0 +1,30 @@
+#!/usr/bin/env -S cargo run --
+// an example using classes, inheritance, class fields
+
+class Cake {
+  init(flavor) {
+    this.flavor = flavor;
+  }
+
+  taste() {
+    return "The " + this.flavor + " cake is delicious!";
+  }
+}
+
+class BirthdayCake < Cake {
+  init(flavor, candles) {
+    super.init(flavor);
+    this.candles = candles;
+  }
+
+  blow() {
+    return "Blew out " + this.candles + " candles!";
+  }
+}
+
+var cake = Cake("chocolate");
+print cake.taste();
+
+var bday = BirthdayCake("vanilla", "10");
+print bday.taste();
+print bday.blow();

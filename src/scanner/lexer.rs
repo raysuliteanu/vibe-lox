@@ -1,13 +1,19 @@
-use winnow::combinator::alt;
+use winnow::combinator::{alt, opt};
 use winnow::error::ContextError;
 use winnow::prelude::*;
 use winnow::stream::{LocatingSlice, Location};
-use winnow::token::{any, take_while};
+use winnow::token::{any, take_till, take_while};
 
 use crate::error::CompileError;
 use crate::scanner::token::{Span, Token, TokenKind, keyword_kind};
 
 type Input<'a> = LocatingSlice<&'a str>;
+
+fn shebang<'a>(input: &mut Input<'a>) -> ModalResult<()> {
+    ("#!", take_till(0.., '\n'), opt('\n'))
+        .void()
+        .parse_next(input)
+}
 
 fn whitespace_and_comments<'a>(input: &mut Input<'a>) -> ModalResult<()> {
     loop {
@@ -161,6 +167,7 @@ fn scan_token<'a>(input: &mut Input<'a>) -> ModalResult<Token> {
 /// Scan all tokens from source, returning either a token list or scan errors.
 pub fn scan_all(source: &str) -> Result<Vec<Token>, Vec<CompileError>> {
     let mut input = LocatingSlice::new(source);
+    let _ = opt(shebang).parse_next(&mut input);
     let mut tokens = Vec::new();
     let mut errors = Vec::new();
 
@@ -383,5 +390,37 @@ mod tests {
         let source = "var x = 1;\nvar y = 2;\nprint x + y;";
         let tokens = scan_ok(source);
         assert_eq!(tokens.len(), 16); // 15 tokens + EOF
+    }
+
+    use rstest::rstest;
+
+    #[rstest]
+    #[case("shebang only", "#!/usr/bin/env lox", &[TokenKind::Eof])]
+    #[case(
+        "shebang with newline and code",
+        "#!/usr/bin/env lox\nprint 1;",
+        &[TokenKind::Print, TokenKind::Number, TokenKind::Semicolon, TokenKind::Eof]
+    )]
+    #[case(
+        "no shebang unaffected",
+        "print 1;",
+        &[TokenKind::Print, TokenKind::Number, TokenKind::Semicolon, TokenKind::Eof]
+    )]
+    #[case("shebang without trailing newline", "#!/usr/bin/env lox", &[TokenKind::Eof])]
+    fn shebang_cases(#[case] _label: &str, #[case] source: &str, #[case] expected: &[TokenKind]) {
+        let tokens = scan_ok(source);
+        assert_eq!(kinds(&tokens), expected);
+    }
+
+    #[test]
+    fn shebang_code_spans_are_after_shebang_line() {
+        // `print` begins at byte 20, after "#!/usr/bin/env lox\n" (19 chars + newline = 20)
+        let source = "#!/usr/bin/env lox\nprint 1;";
+        let tokens = scan_ok(source);
+        let print_span = tokens[0].span;
+        assert_eq!(
+            print_span.offset, 19,
+            "print token should start after shebang line"
+        );
     }
 }

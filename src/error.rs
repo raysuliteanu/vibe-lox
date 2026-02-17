@@ -1,4 +1,4 @@
-// thiserror + miette derive macros generate unused assignments in expanded code
+// thiserror + miette derive macros generate unused assignments in expanded code, so...
 #![allow(unused_assignments)]
 
 use miette::{Diagnostic, SourceSpan};

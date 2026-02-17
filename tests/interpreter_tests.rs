@@ -38,6 +38,7 @@ fn run_fixture_err(source: &str) -> RuntimeError {
 #[case("counter.lox")]
 #[case("fib.lox")]
 #[case("hello.lox")]
+#[case("shebang.lox")]
 fn interpreter_fixture(#[case] fixture: &str) {
     let fixture_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures");
     let source = std::fs::read_to_string(fixture_dir.join(fixture))
