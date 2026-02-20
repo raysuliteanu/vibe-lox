@@ -27,6 +27,7 @@ cargo run -- --dump-ast <f>    # Show AST (S-expressions) and stop
 cargo run -- --compile-bytecode <file.lox>  # Compile and save bytecode to .blox
 cargo run -- --disassemble <f> # Disassemble (source or .blox) and print
 cargo run                      # Enter REPL (no file argument)
+                               #   REPL commands: \help \quit \clear \version
 LOX_BACKTRACE=1 cargo run -- <file.lox>  # Show stack backtrace on runtime errors
 ```
 

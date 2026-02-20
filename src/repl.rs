@@ -30,6 +30,16 @@ pub fn run_repl() {
             continue;
         }
 
+        if trimmed.starts_with('\\') {
+            let mut parts = trimmed.split_whitespace();
+            let cmd = parts.next().unwrap_or("");
+            let args: Vec<&str> = parts.collect();
+            if handle_command(cmd, &args) {
+                break;
+            }
+            continue;
+        }
+
         // Auto-wrap bare expressions: if the line doesn't end with ';' or '}',
         // wrap it as `print <expr>;` so the user sees the result.
         let source = if is_bare_expression(trimmed) {
@@ -87,6 +97,37 @@ pub fn run_repl() {
     }
 }
 
+/// Dispatch a backslash command. Returns `true` if the REPL should exit.
+fn handle_command(cmd: &str, args: &[&str]) -> bool {
+    if !args.is_empty() {
+        eprintln!("warning: '{cmd}' does not accept arguments");
+    }
+    match cmd {
+        "\\help" => {
+            println!("REPL commands:");
+            println!("  \\help     Show this help message");
+            println!("  \\quit     Exit the REPL");
+            println!("  \\clear    Clear the terminal screen");
+            println!("  \\version  Show the interpreter version");
+            false
+        }
+        "\\quit" => true,
+        "\\clear" => {
+            print!("\x1b[2J\x1b[H");
+            io::stdout().flush().expect("flush stdout");
+            false
+        }
+        "\\version" => {
+            println!("{}", env!("CARGO_PKG_VERSION"));
+            false
+        }
+        other => {
+            eprintln!("Unknown command '{other}'. Type \\help for available commands.");
+            false
+        }
+    }
+}
+
 /// Heuristic: treat the line as a bare expression if it doesn't end with
 /// ';' or '}' and doesn't start with a keyword that begins a declaration
 /// or statement.
@@ -114,5 +155,24 @@ mod tests {
         assert!(!is_bare_expression("{ var x = 1; }"));
         assert!(!is_bare_expression("if (true) print 1;"));
         assert!(!is_bare_expression("fun foo() {}"));
+    }
+
+    #[test]
+    fn handle_command_quit_returns_true() {
+        assert!(handle_command("\\quit", &[]));
+    }
+
+    #[test]
+    fn handle_command_non_quit_returns_false() {
+        assert!(!handle_command("\\help", &[]));
+        assert!(!handle_command("\\clear", &[]));
+        assert!(!handle_command("\\version", &[]));
+        assert!(!handle_command("\\unknown", &[]));
+    }
+
+    #[test]
+    fn handle_command_quit_with_args_still_exits() {
+        // Extra args trigger a warning but quit should still return true.
+        assert!(handle_command("\\quit", &["extra"]));
     }
 }

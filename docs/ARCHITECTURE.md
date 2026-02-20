@@ -1476,7 +1476,7 @@ runtime/                 # C runtime for LLVM-compiled programs
 - `vm/vm.rs` (70 tests): VM execution, all opcodes
 - `codegen/compiler.rs` (52 tests): LLVM IR generation, type checks
 - `error.rs` (14 tests): Error trait implementations
-- `repl.rs` (1 test): Bare expression detection
+- `repl.rs` (4 tests): Bare expression detection, backslash command dispatch
 
 **Test helpers:**
 
@@ -1598,7 +1598,7 @@ rstest = "0.26"         # Parameterized testing
 3. **Invoke optimization:** Extend to more property access patterns
 4. ~~**Bytecode format:** Binary format instead of JSON~~ (done — uses MessagePack with magic header)
 5. ~~**LLVM IR compilation**~~ (done — full Lox language support via `inkwell`)
-6. **REPL improvements:** Multi-line input, syntax highlighting
+6. **REPL improvements:** Multi-line input, syntax highlighting, ~~backslash commands~~ (done — `\help`, `\quit`, `\clear`, `\version`)
 7. **Debugger:** Step through bytecode, inspect stack
 8. ~~**LLVM native compilation:** Compile `.ll` to native binary via `clang`~~ (done — `--compile` produces native ELF executables via inkwell `TargetMachine`)
 9. **Garbage collection:** The C runtime currently leaks all heap allocations
