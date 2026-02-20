@@ -56,6 +56,12 @@ Bare expressions are auto-printed, so you can type `1 + 2` and see `3` without
 wrapping it in `print`. The REPL preserves the environment across lines, so
 variables and functions you define in one line are available in the next.
 
+The REPL uses `rustyline` for line editing, providing:
+
+- **Tab completion** for backslash commands — `\<Tab>` lists all commands;
+  a partial prefix (e.g. `\q<Tab>`) expands unambiguously to the long form
+- **Arrow-key history** and **Ctrl-R** reverse search across Lox expressions
+
 The REPL supports the following backslash commands (backslash instead of slash
 because `/` is the Lox division operator):
 

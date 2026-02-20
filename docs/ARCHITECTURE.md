@@ -1417,7 +1417,7 @@ src/
 ├── main.rs              # CLI entry point, argument parsing
 ├── lib.rs               # Library crate root, public API
 ├── error.rs             # LoxError enum, error types
-├── repl.rs              # Interactive REPL
+├── repl.rs              # Interactive REPL (rustyline: tab completion, history)
 │
 ├── scanner/             # Phase 1: Tokenization
 │   ├── mod.rs          # Public scan() API
@@ -1476,7 +1476,7 @@ runtime/                 # C runtime for LLVM-compiled programs
 - `vm/vm.rs` (70 tests): VM execution, all opcodes
 - `codegen/compiler.rs` (52 tests): LLVM IR generation, type checks
 - `error.rs` (14 tests): Error trait implementations
-- `repl.rs` (4 tests): Bare expression detection, backslash command dispatch
+- `repl.rs` (8 tests): Bare expression detection, backslash command dispatch, tab completion
 
 **Test helpers:**
 
@@ -1579,6 +1579,7 @@ serde = "1.0"           # Serialization
 serde_json = "1.0"      # JSON AST output
 rmp-serde = "1.3"       # MessagePack bytecode serialization
 inkwell = "0.8"         # LLVM 21 bindings (feature: llvm21-1)
+rustyline = "17"        # REPL line editing: tab completion, history (no default features)
 ```
 
 ### Dev Dependencies

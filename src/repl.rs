@@ -1,29 +1,74 @@
-use std::io::{self, BufRead, Write};
+use std::io::{self, Write};
+
+use rustyline::completion::{Completer, Pair};
+use rustyline::highlight::Highlighter;
+use rustyline::hint::Hinter;
+use rustyline::validate::Validator;
+use rustyline::{CompletionType, Config, Context, Editor, Helper};
 
 use crate::interpreter::Interpreter;
 use crate::interpreter::resolver::Resolver;
 use crate::parser::Parser;
 use crate::scanner;
 
+// Long-form commands offered for tab completion. Short forms (\h, \q, etc.)
+// match as prefixes and expand to these automatically.
+const COMMANDS: &[(&str, &str)] = &[
+    ("\\help", "show this help message"),
+    ("\\quit", "exit the REPL"),
+    ("\\clear", "clear the terminal screen"),
+    ("\\version", "show the interpreter version"),
+];
+
+struct ReplHelper;
+
+impl Completer for ReplHelper {
+    type Candidate = Pair;
+
+    fn complete(
+        &self,
+        line: &str,
+        pos: usize,
+        _ctx: &Context<'_>,
+    ) -> rustyline::Result<(usize, Vec<Pair>)> {
+        let prefix = &line[..pos];
+        // Only complete backslash commands at the start of an otherwise empty line.
+        if !prefix.starts_with('\\') || prefix.contains(char::is_whitespace) {
+            return Ok((pos, vec![]));
+        }
+        Ok((0, complete_commands(prefix)))
+    }
+}
+
+impl Hinter for ReplHelper {
+    type Hint = String;
+}
+impl Highlighter for ReplHelper {}
+impl Validator for ReplHelper {}
+impl Helper for ReplHelper {}
+
 /// Run the interactive REPL. Environment persists across lines.
 pub fn run_repl() {
-    let stdin = io::stdin();
-    let mut stdout = io::stdout();
+    let config = Config::builder()
+        .completion_type(CompletionType::List)
+        .build();
+
+    let mut rl: Editor<ReplHelper, rustyline::history::DefaultHistory> =
+        Editor::with_config(config).expect("rustyline init cannot fail with valid config");
+    rl.set_helper(Some(ReplHelper));
+
     let mut interpreter = Interpreter::new();
 
     loop {
-        print!("> ");
-        stdout.flush().expect("flush stdout");
-
-        let mut line = String::new();
-        match stdin.lock().read_line(&mut line) {
-            Ok(0) => break, // Ctrl-D / EOF
-            Ok(_) => {}
+        let line = match rl.readline("> ") {
+            Ok(l) => l,
+            Err(rustyline::error::ReadlineError::Interrupted) => break, // Ctrl-C
+            Err(rustyline::error::ReadlineError::Eof) => break,         // Ctrl-D
             Err(e) => {
                 eprintln!("read error: {e}");
                 break;
             }
-        }
+        };
 
         let trimmed = line.trim();
         if trimmed.is_empty() {
@@ -39,6 +84,9 @@ pub fn run_repl() {
             }
             continue;
         }
+
+        // Only Lox expressions go into history, keeping it focused on code.
+        let _ = rl.add_history_entry(trimmed);
 
         // Auto-wrap bare expressions: if the line doesn't end with ';' or '}',
         // wrap it as `print <expr>;` so the user sees the result.
@@ -128,6 +176,18 @@ fn handle_command(cmd: &str, args: &[&str]) -> bool {
     }
 }
 
+/// Return the commands from `COMMANDS` whose name starts with `prefix`.
+fn complete_commands(prefix: &str) -> Vec<Pair> {
+    COMMANDS
+        .iter()
+        .filter(|(cmd, _)| cmd.starts_with(prefix))
+        .map(|(cmd, desc)| Pair {
+            replacement: cmd.to_string(),
+            display: format!("{cmd}  {desc}"),
+        })
+        .collect()
+}
+
 /// Heuristic: treat the line as a bare expression if it doesn't end with
 /// ';' or '}' and doesn't start with a keyword that begins a declaration
 /// or statement.
@@ -179,5 +239,29 @@ mod tests {
         // Extra args trigger a warning but quit should still return true.
         assert!(handle_command("\\quit", &["extra"]));
         assert!(handle_command("\\q", &["extra"]));
+    }
+
+    #[test]
+    fn complete_commands_all_on_backslash_only() {
+        assert_eq!(complete_commands("\\").len(), 4);
+    }
+
+    #[test]
+    fn complete_commands_single_match() {
+        let matches = complete_commands("\\q");
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].replacement, "\\quit");
+    }
+
+    #[test]
+    fn complete_commands_short_forms_expand_to_long() {
+        assert_eq!(complete_commands("\\h")[0].replacement, "\\help");
+        assert_eq!(complete_commands("\\c")[0].replacement, "\\clear");
+        assert_eq!(complete_commands("\\v")[0].replacement, "\\version");
+    }
+
+    #[test]
+    fn complete_commands_empty_for_unknown_prefix() {
+        assert!(complete_commands("\\xyz").is_empty());
     }
 }
