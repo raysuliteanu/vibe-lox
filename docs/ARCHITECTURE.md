@@ -132,7 +132,8 @@ Transform source code string into a stream of tokens with precise source locatio
 
 - **Implementation:** Uses `winnow` parser combinator library
 - **Key Functions:**
-    - `scan_all()` - Main entry point, collects all tokens
+    - `scan_all()` - Main entry point, skips optional shebang then collects all tokens
+    - `shebang()` - Consume `#!...` through end of first line (enables direct Unix execution)
     - `scan_token()` - Parse single token with error recovery
     - `whitespace_and_comments()` - Skip whitespace and `//` comments
     - `string_literal()` - Parse strings with escape sequences (`\n`, `\t`, `\\`, `\"`)
@@ -155,6 +156,11 @@ Transform source code string into a stream of tokens with precise source locatio
 3. **Error recovery:** Scanner collects all errors before returning
     - Allows reporting multiple syntax errors at once
     - Better user experience than stopping at first error
+
+4. **Shebang skipping in the scanner, not the caller:** `#!...` is consumed by
+   `opt(shebang)` at the top of `scan_all()` before `LocatingSlice` is read further
+    - Span offsets remain correct relative to the original source string
+    - Pre-stripping in the caller would shift all offsets, breaking error diagnostics
 
 ### Data Flow
 
@@ -1455,11 +1461,11 @@ runtime/                 # C runtime for LLVM-compiled programs
 
 ## Testing Strategy
 
-### Unit Tests (294 tests)
+### Unit Tests (~302 tests)
 
 **By module:**
 
-- `scanner/lexer.rs` (18 tests): Token types, spans, errors
+- `scanner/lexer.rs` (23 tests): Token types, spans, errors, shebang handling
 - `parser/mod.rs` (22 tests): Grammar rules, precedence, recovery
 - `ast/printer.rs` (2 tests): S-expr and JSON output
 - `interpreter/environment.rs` (6 tests): Scope operations
@@ -1487,7 +1493,7 @@ fn resolve(source: &str) -> Result<HashMap<ExprId, usize>, Vec<LoxError>>
 
 ```
 tests/
-├── interpreter_tests.rs       # Tree-walk interpreter (9 tests)
+├── interpreter_tests.rs       # Tree-walk interpreter (10 tests)
 ├── vm_tests.rs                # Bytecode VM (12 tests)
 ├── llvm_tests.rs              # LLVM IR codegen (13 tests)
 └── native_compile_tests.rs    # Native ELF compilation (14 tests)
@@ -1500,6 +1506,7 @@ fixtures/
 ├── classes.lox             # OOP features
 ├── counter.lox             # Closures
 ├── fib.lox                 # Recursion
+├── shebang.lox             # Shebang line handling
 ├── strings.lox             # String operations
 ├── error_*.lox             # Runtime error test cases
 ├── *.expected              # Expected stdout for success fixtures

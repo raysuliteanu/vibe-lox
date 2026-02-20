@@ -14,6 +14,7 @@ cargo clippy -- -D warnings    # Lint (must be clean before commits)
 cargo fmt --check              # Check formatting
 cargo fmt                      # Fix formatting
 cargo run -- <file.lox>        # Interpret a Lox file (tree-walk, default)
+chmod +x <file.lox> && ./<file.lox>  # Direct execution via shebang (#!/usr/bin/env -S cargo run --)
 cargo run -- <file.blox>       # Autodetect bytecode and run via VM
 cargo run -- --compile-llvm <file.lox> # Compile to LLVM IR (.ll file)
 cargo run -- --compile-llvm -o out.ll <file.lox>  # Compile to custom output path
