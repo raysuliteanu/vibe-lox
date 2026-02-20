@@ -103,21 +103,21 @@ fn handle_command(cmd: &str, args: &[&str]) -> bool {
         eprintln!("warning: '{cmd}' does not accept arguments");
     }
     match cmd {
-        "\\help" => {
+        "\\h" | "\\help" => {
             println!("REPL commands:");
-            println!("  \\help     Show this help message");
-            println!("  \\quit     Exit the REPL");
-            println!("  \\clear    Clear the terminal screen");
-            println!("  \\version  Show the interpreter version");
+            println!("  \\h, \\help     Show this help message");
+            println!("  \\q, \\quit     Exit the REPL");
+            println!("  \\c, \\clear    Clear the terminal screen");
+            println!("  \\v, \\version  Show the interpreter version");
             false
         }
-        "\\quit" => true,
-        "\\clear" => {
+        "\\q" | "\\quit" => true,
+        "\\c" | "\\clear" => {
             print!("\x1b[2J\x1b[H");
             io::stdout().flush().expect("flush stdout");
             false
         }
-        "\\version" => {
+        "\\v" | "\\version" => {
             println!("{}", env!("CARGO_PKG_VERSION"));
             false
         }
@@ -160,13 +160,17 @@ mod tests {
     #[test]
     fn handle_command_quit_returns_true() {
         assert!(handle_command("\\quit", &[]));
+        assert!(handle_command("\\q", &[]));
     }
 
     #[test]
     fn handle_command_non_quit_returns_false() {
         assert!(!handle_command("\\help", &[]));
+        assert!(!handle_command("\\h", &[]));
         assert!(!handle_command("\\clear", &[]));
+        assert!(!handle_command("\\c", &[]));
         assert!(!handle_command("\\version", &[]));
+        assert!(!handle_command("\\v", &[]));
         assert!(!handle_command("\\unknown", &[]));
     }
 
@@ -174,5 +178,6 @@ mod tests {
     fn handle_command_quit_with_args_still_exits() {
         // Extra args trigger a warning but quit should still return true.
         assert!(handle_command("\\quit", &["extra"]));
+        assert!(handle_command("\\q", &["extra"]));
     }
 }

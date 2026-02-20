@@ -59,12 +59,12 @@ variables and functions you define in one line are available in the next.
 The REPL supports the following backslash commands (backslash instead of slash
 because `/` is the Lox division operator):
 
-| Command    | Description                    |
-|------------|--------------------------------|
-| `\help`    | Show available REPL commands   |
-| `\quit`    | Exit the REPL                  |
-| `\clear`   | Clear the terminal screen      |
-| `\version` | Print the interpreter version  |
+| Short | Long       | Description                   |
+|-------|------------|-------------------------------|
+| `\h`  | `\help`    | Show available REPL commands  |
+| `\q`  | `\quit`    | Exit the REPL                 |
+| `\c`  | `\clear`   | Clear the terminal screen     |
+| `\v`  | `\version` | Print the interpreter version |
 
 ## TODOs
 
