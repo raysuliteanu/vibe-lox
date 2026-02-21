@@ -3,7 +3,7 @@
 ## Project Overview
 
 A Lox language interpreter and compiler in Rust, implementing the grammar
-defined in `Grammar.md`. See `PLAN.md` for the phased implementation plan.
+defined in `Grammar.md`. See `docs/ARCHITECTURE.md` for architecture details.
 
 ## Build & Test Commands
 

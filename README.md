@@ -66,7 +66,7 @@ The REPL supports the following backslash commands (backslash instead of slash
 because `/` is the Lox division operator):
 
 | Short | Long       | Description                   |
-|-------|------------|-------------------------------|
+| ----- | ---------- | ----------------------------- |
 | `\h`  | `\help`    | Show available REPL commands  |
 | `\q`  | `\quit`    | Exit the REPL                 |
 | `\c`  | `\clear`   | Clear the terminal screen     |
@@ -80,3 +80,6 @@ because `/` is the Lox division operator):
 - explore performance optimizations
 - document the codebase comprehensively
 - create some example Lox programs in examples/ to run with `cargo run --example`
+- enhance the Lox grammar to support input; currently a Lox program can only
+  write to `stdout` via `print`; there is no `read` or some such capability in the
+  Lox grammar; an extension would be interesting
