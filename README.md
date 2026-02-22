@@ -83,3 +83,5 @@ because `/` is the Lox division operator):
 - enhance the Lox grammar to support input; currently a Lox program can only
   write to `stdout` via `print`; there is no `read` or some such capability in the
   Lox grammar; an extension would be interesting
+- add string concatenation to the language
+- add some other string operations like length and indexing into a string
