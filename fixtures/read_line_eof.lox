@@ -1,0 +1,7 @@
+// readLine() on empty stdin returns nil.
+var line = readLine();
+if (line == nil) {
+    print "EOF";
+} else {
+    print line;
+}

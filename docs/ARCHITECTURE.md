@@ -84,6 +84,48 @@ This ensures all backends handle the same language semantics.
 
 ---
 
+## Native Functions (Standard Library)
+
+**Location:** `src/stdlib.rs` (shared helpers), `src/interpreter/callable.rs`, `src/vm/vm.rs`, `runtime/lox_runtime.c`
+
+Lox native functions are registered as globals at interpreter startup and available in all three backends. They require no grammar changes — they are called as ordinary function expressions.
+
+| Function        | Arity | Returns         | Description                                           |
+|-----------------|-------|-----------------|-------------------------------------------------------|
+| `clock()`       | 0     | `number`        | Seconds since Unix epoch (wall-clock time)            |
+| `readLine()`    | 0     | `string \| nil` | Reads one line from stdin, strips newline; nil at EOF |
+| `toNumber(v)`   | 1     | `number \| nil` | Converts a value to number; nil if not parseable      |
+
+### `readLine()` semantics
+
+- Reads bytes from stdin up to and including `\n` (or EOF)
+- Strips the trailing `\n` (and `\r` for Windows `\r\n` endings)
+- Returns `""` for an empty line; `nil` only when stdin is already at EOF
+- Each call consumes exactly one line; multiple calls read successive lines
+
+### `toNumber(v)` semantics
+
+- **`number`** → returned unchanged
+- **`string`** → trimmed and parsed as a Lox `NUMBER` literal (`DIGIT+ ("." DIGIT+)?`); no sign, no scientific notation; returns `nil` on failure
+- **anything else** (nil, bool, function, class, instance) → `nil`
+
+### Shared Rust logic (`src/stdlib.rs`)
+
+```rust
+/// Read one line from any BufRead source; strip trailing \r\n; None on EOF.
+pub fn read_line_from<R: std::io::BufRead>(reader: &mut R) -> Option<String>;
+
+/// Parse a Lox NUMBER literal (DIGIT+ ("." DIGIT+)?), trimming whitespace.
+pub fn parse_lox_number(s: &str) -> Option<f64>;
+```
+
+Both the tree-walk interpreter and the bytecode VM call these functions. The LLVM
+backend uses equivalent C implementations in `runtime/lox_runtime.c` (`lox_read_line`,
+`lox_to_number`), wrapped in LLVM IR shim functions registered as closures in
+`src/codegen/compiler.rs`.
+
+---
+
 ## Phase 1: Tokenization (Lexical Analysis)
 
 **Location:** `src/scanner/`
@@ -575,7 +617,9 @@ impl Callable {
 }
 
 pub enum NativeFunction {
-    Clock,  // Returns Unix timestamp
+    Clock,      // Returns Unix timestamp as f64
+    ReadLine,   // Reads one line from stdin; nil on EOF
+    ToNumber,   // Converts string/number to number; nil otherwise
 }
 ```
 
@@ -1075,7 +1119,8 @@ All Lox values are represented as a tagged union struct `{ i8, i64 }`:
   `lox_alloc_cell`, `lox_cell_get`, `lox_cell_set`, `lox_string_concat`,
   `lox_string_equal`, `lox_alloc_class`, `lox_class_add_method`,
   `lox_alloc_instance`, `lox_instance_get_property`, `lox_instance_set_field`,
-  `lox_class_find_method`, `lox_bind_method`, `lox_clock`
+  `lox_class_find_method`, `lox_bind_method`, `lox_clock`,
+  `lox_read_line`, `lox_to_number`
 
 #### `src/codegen/compiler.rs`
 
@@ -1091,7 +1136,10 @@ All Lox values are represented as a tagged union struct `{ i8, i64 }`:
 - Implements: printing, global variable hash map, truthiness, error reporting,
   closure allocation, heap cells for captured variables, string concatenation
   and equality, class/instance allocation, field get/set, method lookup
-  (walks superclass chain), method binding, `clock()` native function
+  (walks superclass chain), method binding
+- Native functions: `clock()` (Unix timestamp), `readLine()` (stdin line
+  reader via POSIX `getline`), `toNumber()` (string-to-number conversion
+  following the Lox `NUMBER` literal grammar)
 - Number formatting matches Lox semantics (integers without `.0`)
 
 ### Feature Coverage
@@ -1418,6 +1466,7 @@ src/
 ├── lib.rs               # Library crate root, public API
 ├── error.rs             # LoxError enum, error types
 ├── repl.rs              # Interactive REPL (rustyline: tab completion, history)
+├── stdlib.rs            # Shared native-function helpers (read_line_from, parse_lox_number)
 │
 ├── scanner/             # Phase 1: Tokenization
 │   ├── mod.rs          # Public scan() API
@@ -1434,7 +1483,7 @@ src/
 ├── interpreter/         # Phase 3B: Tree-walk interpretation
 │   ├── mod.rs          # Interpreter struct, main logic
 │   ├── value.rs        # Value enum, LoxClass, LoxInstance
-│   ├── callable.rs     # Function calling, NativeFunction
+│   ├── callable.rs     # Function calling, NativeFunction (Clock, ReadLine, ToNumber)
 │   ├── environment.rs  # Variable scoping
 │   └── resolver.rs     # Phase 3A: Static resolution
 │
@@ -1442,18 +1491,19 @@ src/
 │   ├── mod.rs          # Public API
 │   ├── chunk.rs        # OpCode, Constant, Chunk
 │   ├── compiler.rs     # AST → bytecode compiler
-│   └── vm.rs           # Stack-based VM execution
+│   └── vm.rs           # Stack-based VM execution (NativeFn: Clock, ReadLine, ToNumber)
 │
 └── codegen/             # Phase 5: LLVM IR and native compilation
     ├── mod.rs          # Public compile() and compile_to_module() API
-    ├── compiler.rs     # CodeGen struct, AST → LLVM IR
+    ├── compiler.rs     # CodeGen struct, AST → LLVM IR; registers all native wrappers
     ├── native.rs       # Native ELF compilation (object emission + linking)
     ├── capture.rs      # Capture analysis (variables crossing function boundaries)
     ├── types.rs        # LoxValue type ({i8, i64} tagged union)
     └── runtime.rs      # External runtime function declarations
 
 runtime/                 # C runtime for LLVM-compiled programs
-├── lox_runtime.c       # print, globals, truthiness, closures, strings, classes
+├── lox_runtime.c       # print, globals, truthiness, closures, strings, classes,
+│                       #   native fns: lox_clock, lox_read_line, lox_to_number
 └── lox_runtime.h       # Header with LoxValue struct and tag constants
 ```
 
@@ -1508,6 +1558,10 @@ fixtures/
 ├── fib.lox                 # Recursion
 ├── shebang.lox             # Shebang line handling
 ├── strings.lox             # String operations
+├── to_number.lox           # toNumber() native function
+├── read_line_echo.lox      # readLine() echo loop (subprocess tests)
+├── read_line_eof.lox       # readLine() EOF → nil (subprocess tests)
+├── read_line_to_number.lox # readLine() + toNumber() combined (subprocess tests)
 ├── error_*.lox             # Runtime error test cases
 ├── *.expected              # Expected stdout for success fixtures
 └── *.expected_error        # Expected stderr for error fixtures
@@ -1604,6 +1658,7 @@ rstest = "0.26"         # Parameterized testing
 8. ~~**LLVM native compilation:** Compile `.ll` to native binary via `clang`~~ (done — `--compile` produces native ELF executables via inkwell `TargetMachine`)
 9. **Garbage collection:** The C runtime currently leaks all heap allocations
 10. **Stack overflow detection:** No depth counter for deep recursion
+11. ~~**Standard input:** `readLine()` and `toNumber()` native functions~~ (done — all three backends; shared logic in `src/stdlib.rs`)
 
 ---
 

@@ -1,0 +1,21 @@
+// toNumber() with valid numeric strings
+print toNumber("42");
+print toNumber("3.14");
+print toNumber("  7  ");
+print toNumber("0.5");
+print toNumber("007");
+
+// toNumber() with invalid / non-parseable inputs
+print toNumber("abc");
+print toNumber("");
+print toNumber("-1");
+print toNumber("1e5");
+print toNumber("3.14.15");
+
+// toNumber() on non-string types
+print toNumber(nil);
+print toNumber(true);
+
+// toNumber() on a number passes through unchanged
+print toNumber(100);
+print toNumber(2.5);

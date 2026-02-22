@@ -1,0 +1,8 @@
+// Read a line from stdin and convert to number; double it.
+var line = readLine();
+var n = toNumber(line);
+if (n == nil) {
+    print "not a number";
+} else {
+    print n * 2;
+}

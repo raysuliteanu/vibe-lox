@@ -36,10 +36,16 @@ impl Default for Interpreter {
 impl Interpreter {
     pub fn new() -> Self {
         let globals = Rc::new(RefCell::new(Environment::new()));
-        globals.borrow_mut().define(
-            "clock".to_string(),
-            Value::Function(Callable::Native(NativeFunction::Clock)),
-        );
+        for native in [
+            NativeFunction::Clock,
+            NativeFunction::ReadLine,
+            NativeFunction::ToNumber,
+        ] {
+            globals.borrow_mut().define(
+                native.name().to_string(),
+                Value::Function(Callable::Native(native)),
+            );
+        }
 
         Self {
             globals: Rc::clone(&globals),
@@ -56,10 +62,16 @@ impl Interpreter {
     #[cfg(test)]
     fn new_capturing() -> Self {
         let globals = Rc::new(RefCell::new(Environment::new()));
-        globals.borrow_mut().define(
-            "clock".to_string(),
-            Value::Function(Callable::Native(NativeFunction::Clock)),
-        );
+        for native in [
+            NativeFunction::Clock,
+            NativeFunction::ReadLine,
+            NativeFunction::ToNumber,
+        ] {
+            globals.borrow_mut().define(
+                native.name().to_string(),
+                Value::Function(Callable::Native(native)),
+            );
+        }
 
         Self {
             globals: Rc::clone(&globals),

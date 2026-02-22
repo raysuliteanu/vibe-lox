@@ -1,3 +1,5 @@
+#define _POSIX_C_SOURCE 200809L
+
 #include "lox_runtime.h"
 
 #include <math.h>
@@ -296,5 +298,60 @@ LoxValue lox_clock(void) {
   LoxValue v;
   v.tag = TAG_NUMBER;
   memcpy(&v.payload, &secs, sizeof(double));
+  return v;
+}
+
+LoxValue lox_read_line(void) {
+  char *buf = NULL;
+  size_t len = 0;
+  ssize_t nread = getline(&buf, &len, stdin);
+  if (nread <= 0) {
+    free(buf);
+    LoxValue nil = {TAG_NIL, 0};
+    return nil;
+  }
+  /* Strip trailing \r\n or \n */
+  while (nread > 0 && (buf[nread - 1] == '\n' || buf[nread - 1] == '\r')) {
+    buf[--nread] = '\0';
+  }
+  LoxValue v;
+  v.tag = TAG_STRING;
+  v.payload = (int64_t)(intptr_t)buf;
+  return v;
+}
+
+/* Returns 1 and sets *out if s is a valid Lox NUMBER literal (after trimming).
+ * Accepts DIGIT+ ("." DIGIT+)? — no sign, no scientific notation. */
+static int parse_lox_number_str(const char *s, double *out) {
+  /* skip leading whitespace */
+  while (*s == ' ' || *s == '\t' || *s == '\r' || *s == '\n') s++;
+  if (*s == '\0') return 0;
+  /* must start with a digit */
+  const char *p = s;
+  if (!(*p >= '0' && *p <= '9')) return 0;
+  while (*p >= '0' && *p <= '9') p++;
+  if (*p == '.') {
+    p++;
+    const char *after_dot = p;
+    while (*p >= '0' && *p <= '9') p++;
+    if (p == after_dot) return 0; /* "3." — no digits after dot */
+  }
+  /* skip trailing whitespace */
+  while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+  if (*p != '\0') return 0; /* extra characters */
+  *out = strtod(s, NULL);
+  return 1;
+}
+
+LoxValue lox_to_number(LoxValue value) {
+  LoxValue nil_val = {TAG_NIL, 0};
+  if (value.tag == TAG_NUMBER) return value;
+  if (value.tag != TAG_STRING) return nil_val;
+  const char *s = (const char *)(intptr_t)value.payload;
+  double result;
+  if (!parse_lox_number_str(s, &result)) return nil_val;
+  LoxValue v;
+  v.tag = TAG_NUMBER;
+  memcpy(&v.payload, &result, sizeof(double));
   return v;
 }

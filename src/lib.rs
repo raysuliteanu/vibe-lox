@@ -5,6 +5,7 @@ pub mod interpreter;
 pub mod parser;
 pub mod repl;
 pub mod scanner;
+pub mod stdlib;
 pub mod vm;
 
 // Re-export error types for convenience

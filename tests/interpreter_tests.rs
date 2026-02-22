@@ -39,6 +39,7 @@ fn run_fixture_err(source: &str) -> RuntimeError {
 #[case("fib.lox")]
 #[case("hello.lox")]
 #[case("shebang.lox")]
+#[case("to_number.lox")]
 fn interpreter_fixture(#[case] fixture: &str) {
     let fixture_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures");
     let source = std::fs::read_to_string(fixture_dir.join(fixture))
@@ -88,4 +89,55 @@ bad();
     let frames = err.backtrace_frames();
     assert_eq!(frames.len(), 1);
     assert_eq!(frames[0].function_name, "bad");
+}
+
+// ---------------------------------------------------------------------------
+// readLine() — subprocess-based tests (require a real stdin pipe)
+// ---------------------------------------------------------------------------
+
+fn run_lox_with_stdin(fixture: &str, stdin_data: &[u8]) -> String {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("fixtures")
+        .join(fixture);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_vibe-lox"))
+        .arg("-q")
+        .arg(fixture_path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn vibe-lox");
+    child
+        .stdin
+        .take()
+        .expect("stdin handle should be present")
+        .write_all(stdin_data)
+        .expect("write stdin data");
+    let out = child.wait_with_output().expect("wait for child process");
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+#[test]
+fn read_line_echo() {
+    let output = run_lox_with_stdin("read_line_echo.lox", b"hello\nworld\n");
+    assert_eq!(output, "hello\nworld\n");
+}
+
+#[test]
+fn read_line_eof() {
+    let output = run_lox_with_stdin("read_line_eof.lox", b"");
+    assert_eq!(output, "EOF\n");
+}
+
+#[test]
+fn read_line_to_number_valid() {
+    let output = run_lox_with_stdin("read_line_to_number.lox", b"21\n");
+    assert_eq!(output, "42\n");
+}
+
+#[test]
+fn read_line_to_number_invalid() {
+    let output = run_lox_with_stdin("read_line_to_number.lox", b"banana\n");
+    assert_eq!(output, "not a number\n");
 }

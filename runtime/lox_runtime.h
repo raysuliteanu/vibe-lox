@@ -93,4 +93,14 @@ LoxValue lox_bind_method(LoxValue instance, LoxClosure *method);
 /* Native functions */
 LoxValue lox_clock(void);
 
+/* Reads one line from stdin, strips the trailing newline.
+ * Returns a TAG_STRING LoxValue (heap-allocated string), or TAG_NIL on EOF. */
+LoxValue lox_read_line(void);
+
+/* Converts a LoxValue to a number (TAG_NUMBER) or TAG_NIL.
+ * Numbers pass through unchanged; strings are parsed as Lox NUMBER literals
+ * (DIGIT+ ("." DIGIT+)?, no sign, no scientific notation).
+ * All other types return TAG_NIL. */
+LoxValue lox_to_number(LoxValue value);
+
 #endif /* LOX_RUNTIME_H */

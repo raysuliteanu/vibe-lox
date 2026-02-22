@@ -78,9 +78,11 @@ enum VmUpvalue {
     Closed(VmValue),
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NativeFn {
     Clock,
+    ReadLine,
+    ToNumber,
 }
 
 #[derive(Debug)]
@@ -122,6 +124,14 @@ impl Vm {
         globals.insert(
             "clock".to_string(),
             VmValue::NativeFunction(NativeFn::Clock),
+        );
+        globals.insert(
+            "readLine".to_string(),
+            VmValue::NativeFunction(NativeFn::ReadLine),
+        );
+        globals.insert(
+            "toNumber".to_string(),
+            VmValue::NativeFunction(NativeFn::ToNumber),
         );
         Self {
             stack: Vec::with_capacity(256),
@@ -584,6 +594,16 @@ impl Vm {
                 Ok(())
             }
             VmValue::NativeFunction(native) => {
+                // Check arity for each native function.
+                let expected_arity = match native {
+                    NativeFn::Clock | NativeFn::ReadLine => 0,
+                    NativeFn::ToNumber => 1,
+                };
+                if arg_count != expected_arity {
+                    return Err(self.runtime_error(format!(
+                        "expected {expected_arity} arguments but got {arg_count}"
+                    )));
+                }
                 let result = match native {
                     NativeFn::Clock => {
                         let secs = SystemTime::now()
@@ -591,6 +611,24 @@ impl Vm {
                             .expect("system clock should be after unix epoch")
                             .as_secs_f64();
                         VmValue::Number(secs)
+                    }
+                    NativeFn::ReadLine => {
+                        match crate::stdlib::read_line_from(&mut std::io::stdin().lock()) {
+                            None => VmValue::Nil,
+                            Some(s) => VmValue::String(Rc::new(s)),
+                        }
+                    }
+                    NativeFn::ToNumber => {
+                        // arg_count == 1 is guaranteed by the arity check above
+                        let arg = self.stack[self.stack.len() - 1].clone();
+                        match arg {
+                            VmValue::Number(_) => arg,
+                            VmValue::String(s) => match crate::stdlib::parse_lox_number(&s) {
+                                Some(n) => VmValue::Number(n),
+                                None => VmValue::Nil,
+                            },
+                            _ => VmValue::Nil,
+                        }
                     }
                 };
                 // Remove callee + args, push result
@@ -1234,6 +1272,59 @@ mod tests {
         assert_eq!(output.len(), 1);
         // Clock should return a number (unix timestamp)
         assert!(output[0].parse::<f64>().is_ok());
+    }
+
+    // ========== toNumber() ==========
+
+    #[rstest]
+    #[case(r#"print toNumber("42");"#, "42")]
+    #[case(r#"print toNumber("3.14");"#, "3.14")]
+    #[case(r#"print toNumber("  7  ");"#, "7")]
+    #[case(r#"print toNumber("0.5");"#, "0.5")]
+    #[case(r#"print toNumber("007");"#, "7")]
+    fn vm_to_number_valid(#[case] source: &str, #[case] expected: &str) {
+        assert_eq!(run_vm(source), vec![expected]);
+    }
+
+    #[test]
+    fn vm_to_number_passthrough() {
+        assert_eq!(run_vm("print toNumber(100);"), vec!["100"]);
+        assert_eq!(run_vm("print toNumber(2.5);"), vec!["2.5"]);
+    }
+
+    #[rstest]
+    #[case(r#"print toNumber("abc");"#)]
+    #[case(r#"print toNumber("");"#)]
+    #[case(r#"print toNumber("-1");"#)]
+    #[case(r#"print toNumber("1e5");"#)]
+    #[case(r#"print toNumber("3.14.15");"#)]
+    fn vm_to_number_invalid(#[case] source: &str) {
+        assert_eq!(run_vm(source), vec!["nil"]);
+    }
+
+    #[test]
+    fn vm_to_number_nil() {
+        assert_eq!(run_vm("print toNumber(nil);"), vec!["nil"]);
+    }
+
+    #[test]
+    fn vm_to_number_bool() {
+        assert_eq!(run_vm("print toNumber(true);"), vec!["nil"]);
+        assert_eq!(run_vm("print toNumber(false);"), vec!["nil"]);
+    }
+
+    #[test]
+    fn vm_to_number_wrong_arity() {
+        let err = run_vm_err("toNumber();");
+        assert!(err.to_string().contains("expected 1"));
+        let err = run_vm_err("toNumber(1, 2);");
+        assert!(err.to_string().contains("expected 1"));
+    }
+
+    #[test]
+    fn vm_read_line_wrong_arity() {
+        let err = run_vm_err("readLine(42);");
+        assert!(err.to_string().contains("expected 0"));
     }
 
     // ========== Edge Cases ==========

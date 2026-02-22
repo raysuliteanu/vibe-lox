@@ -27,6 +27,8 @@ pub struct RuntimeDecls<'ctx> {
     pub lox_class_find_method: FunctionValue<'ctx>,
     pub lox_bind_method: FunctionValue<'ctx>,
     pub lox_clock: FunctionValue<'ctx>,
+    pub lox_read_line: FunctionValue<'ctx>,
+    pub lox_to_number: FunctionValue<'ctx>,
 }
 
 impl<'ctx> RuntimeDecls<'ctx> {
@@ -149,6 +151,14 @@ impl<'ctx> RuntimeDecls<'ctx> {
         let lox_clock_ty = lv_type.fn_type(&[], false);
         let lox_clock = module.add_function("lox_clock", lox_clock_ty, None);
 
+        // LoxValue lox_read_line(void)
+        let lox_read_line_ty = lv_type.fn_type(&[], false);
+        let lox_read_line = module.add_function("lox_read_line", lox_read_line_ty, None);
+
+        // LoxValue lox_to_number(LoxValue value)
+        let lox_to_number_ty = lv_type.fn_type(&[lv_type.into()], false);
+        let lox_to_number = module.add_function("lox_to_number", lox_to_number_ty, None);
+
         Self {
             lox_print,
             lox_global_get,
@@ -169,6 +179,8 @@ impl<'ctx> RuntimeDecls<'ctx> {
             lox_class_find_method,
             lox_bind_method,
             lox_clock,
+            lox_read_line,
+            lox_to_number,
         }
     }
 }

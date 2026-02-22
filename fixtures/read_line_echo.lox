@@ -1,0 +1,6 @@
+// Echo each line from stdin until EOF.
+var line = readLine();
+while (line != nil) {
+    print line;
+    line = readLine();
+}

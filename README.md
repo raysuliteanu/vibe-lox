@@ -80,9 +80,7 @@ because `/` is the Lox division operator):
 - explore performance optimizations
 - document the codebase comprehensively
 - create some example Lox programs in examples/ to run with `cargo run --example`
-- enhance the Lox grammar to support input; currently a Lox program can only
-  write to `stdout` via `print`; there is no `read` or some such capability in the
-  Lox grammar; an extension would be interesting
+- ~~enhance the Lox grammar to support input~~ (done — `readLine()` reads a line from stdin, `toNumber(v)` converts strings to numbers; both work across all three backends)
 - add string concatenation to the language
 - add some other string operations like length and indexing into a string
 - support multiple compilation units i.e. multiple .lox files compiled into a

@@ -108,6 +108,8 @@ impl<'ctx> CodeGen<'ctx> {
 
         // Register native clock() function
         self.register_native_clock()?;
+        self.register_native_read_line()?;
+        self.register_native_to_number()?;
 
         for decl in &program.declarations {
             self.compile_decl(decl)?;
@@ -152,6 +154,82 @@ impl<'ctx> CodeGen<'ctx> {
         // Create a closure for clock and store as global
         let closure_val = self.build_closure(clock_fn, "clock", &[])?;
         self.emit_global_set("clock", closure_val);
+
+        Ok(())
+    }
+
+    /// Register the native `readLine()` function as a global.
+    fn register_native_read_line(&mut self) -> anyhow::Result<()> {
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        let lv_type = self.lox_value.llvm_type();
+        // Wrapper takes env ptr, returns LoxValue (arity 0)
+        let wrapper_fn_type = lv_type.fn_type(&[ptr_type.into()], false);
+        let wrapper_fn = self
+            .module
+            .add_function("lox_read_line_wrapper", wrapper_fn_type, None);
+        let entry = self.context.append_basic_block(wrapper_fn, "entry");
+
+        let saved_bb = self.builder.get_insert_block();
+        self.builder.position_at_end(entry);
+
+        let result = self
+            .builder
+            .build_call(self.runtime.lox_read_line, &[], "read_line_val")
+            .expect("call lox_read_line")
+            .try_as_basic_value()
+            .unwrap_basic();
+        self.builder
+            .build_return(Some(&result))
+            .expect("return from readLine wrapper");
+
+        if let Some(bb) = saved_bb {
+            self.builder.position_at_end(bb);
+        }
+
+        let closure_val = self.build_closure(wrapper_fn, "readLine", &[])?;
+        self.emit_global_set("readLine", closure_val);
+
+        Ok(())
+    }
+
+    /// Register the native `toNumber()` function as a global.
+    fn register_native_to_number(&mut self) -> anyhow::Result<()> {
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        let lv_type = self.lox_value.llvm_type();
+        // Wrapper takes env ptr + one LoxValue arg, returns LoxValue (arity 1)
+        let wrapper_fn_type = lv_type.fn_type(&[ptr_type.into(), lv_type.into()], false);
+        let wrapper_fn = self
+            .module
+            .add_function("lox_to_number_wrapper", wrapper_fn_type, None);
+        let entry = self.context.append_basic_block(wrapper_fn, "entry");
+
+        let saved_bb = self.builder.get_insert_block();
+        self.builder.position_at_end(entry);
+
+        // Parameter 0 is env ptr (ignored), parameter 1 is the LoxValue argument
+        let arg_val = wrapper_fn
+            .get_nth_param(1)
+            .expect("toNumber wrapper has LoxValue param at index 1");
+        let result = self
+            .builder
+            .build_call(
+                self.runtime.lox_to_number,
+                &[arg_val.into()],
+                "to_number_val",
+            )
+            .expect("call lox_to_number")
+            .try_as_basic_value()
+            .unwrap_basic();
+        self.builder
+            .build_return(Some(&result))
+            .expect("return from toNumber wrapper");
+
+        if let Some(bb) = saved_bb {
+            self.builder.position_at_end(bb);
+        }
+
+        let closure_val = self.build_closure(wrapper_fn, "toNumber", &[])?;
+        self.emit_global_set("toNumber", closure_val);
 
         Ok(())
     }

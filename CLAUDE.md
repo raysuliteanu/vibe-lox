@@ -41,8 +41,17 @@ Pipeline: Source -> Scanner (winnow) -> Tokens -> Parser -> AST -> Interpreter/V
 - `src/interpreter/` -- Tree-walk interpreter (default backend)
 - `src/vm/` -- Bytecode VM (alternative backend)
 - `src/codegen/` -- LLVM IR generation via `inkwell`
+- `src/stdlib.rs` -- Shared native-function helpers (`read_line_from`, `parse_lox_number`)
 - `src/error.rs` -- Error types (`thiserror` + `miette` diagnostics)
 - `runtime/` -- C runtime library for LLVM-compiled programs (built automatically by `build.rs`)
+
+## Native Functions
+
+Built-in functions available in all backends (no grammar changes required):
+
+- `clock()` -- Unix timestamp in seconds
+- `readLine()` -- Read one line from stdin; returns `string` or `nil` at EOF
+- `toNumber(v)` -- Convert string/number to `number`; `nil` if not parseable
 
 ## Key Crate Dependencies
 

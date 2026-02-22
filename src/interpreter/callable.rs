@@ -65,18 +65,24 @@ pub struct LoxFunction {
 #[derive(Debug, Clone, Copy)]
 pub enum NativeFunction {
     Clock,
+    ReadLine,
+    ToNumber,
 }
 
 impl NativeFunction {
     pub fn name(&self) -> &str {
         match self {
             Self::Clock => "clock",
+            Self::ReadLine => "readLine",
+            Self::ToNumber => "toNumber",
         }
     }
 
     pub fn arity(&self) -> usize {
         match self {
             Self::Clock => 0,
+            Self::ReadLine => 0,
+            Self::ToNumber => 1,
         }
     }
 
@@ -90,6 +96,18 @@ impl NativeFunction {
                     .as_secs_f64();
                 Value::Number(secs)
             }
+            Self::ReadLine => match crate::stdlib::read_line_from(&mut std::io::stdin().lock()) {
+                Some(s) => Value::Str(s),
+                None => Value::Nil,
+            },
+            Self::ToNumber => match &_args[0] {
+                Value::Number(n) => Value::Number(*n),
+                Value::Str(s) => match crate::stdlib::parse_lox_number(s) {
+                    Some(n) => Value::Number(n),
+                    None => Value::Nil,
+                },
+                _ => Value::Nil,
+            },
         }
     }
 }
