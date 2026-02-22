@@ -85,3 +85,5 @@ because `/` is the Lox division operator):
   Lox grammar; an extension would be interesting
 - add string concatenation to the language
 - add some other string operations like length and indexing into a string
+- support multiple compilation units i.e. multiple .lox files compiled into a
+  single executable.
