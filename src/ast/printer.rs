@@ -230,6 +230,27 @@ mod tests {
     }
 
     #[test]
+    fn json_statement_uses_inner_type_not_statement_wrapper() {
+        let program = Program {
+            declarations: vec![Decl::Statement(Stmt::Print(PrintStmt {
+                expression: Expr::Literal(LiteralExpr {
+                    id: 0,
+                    value: LiteralValue::String("hello".to_string()),
+                    span: Span::new(6, 7),
+                }),
+                span: Span::new(0, 14),
+            }))],
+        };
+        let json = to_json(&program);
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        assert_eq!(parsed["declarations"][0]["type"], "Print");
+        assert!(
+            !json.contains("\"type\": \"Statement\""),
+            "Statement wrapper must not appear as a type tag"
+        );
+    }
+
+    #[test]
     fn json_output_is_valid() {
         let program = Program {
             declarations: vec![Decl::Var(VarDecl {

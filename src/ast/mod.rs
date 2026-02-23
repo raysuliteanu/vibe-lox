@@ -14,13 +14,35 @@ pub struct Program {
     pub declarations: Vec<Decl>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(tag = "type")]
+#[derive(Debug, Clone)]
 pub enum Decl {
     Class(ClassDecl),
     Fun(FunDecl),
     Var(VarDecl),
     Statement(Stmt),
+}
+
+// Serde cannot nest two #[serde(tag = "type")] enums as a newtype variant
+// without emitting duplicate "type" keys. DeclSerHelper handles the three
+// struct-wrapping variants so their "type" tags are emitted correctly, while
+// Decl::Statement delegates directly to Stmt's own serialization.
+#[derive(Serialize)]
+#[serde(tag = "type")]
+enum DeclSerHelper<'a> {
+    Class(&'a ClassDecl),
+    Fun(&'a FunDecl),
+    Var(&'a VarDecl),
+}
+
+impl serde::Serialize for Decl {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Decl::Class(c) => DeclSerHelper::Class(c).serialize(serializer),
+            Decl::Fun(f) => DeclSerHelper::Fun(f).serialize(serializer),
+            Decl::Var(v) => DeclSerHelper::Var(v).serialize(serializer),
+            Decl::Statement(stmt) => stmt.serialize(serializer),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
